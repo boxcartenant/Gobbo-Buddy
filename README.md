@@ -3,7 +3,7 @@ Makes a little floating guy on the desktop with basic emotes.
 Steps to make this work:
 
 1. Install Gobbonet with all the default settings
-2. Inside Gobbonet, under mods, paste the contents of "inline js mod" into a script. (Read it first, of course. Don't trust me or anything
+2. Inside Gobbonet, under mods, paste the contents of "inline js mod" into a script. (Read it first, of course. Don't trust me or anything.)
 3. Write your plain-text password into the python script, replacing "YOUR PASSWORD" as the value for GOBBONET_PASSWORD. (Again -- don't trust me! This is obviously not secure!)
 4. Set up a character sheet to output an emotion from the emotion map before every message.
 5. Run the python script and have your browser open to a thread. Clicking the character and typing a message sends it through your browser into the chat.
