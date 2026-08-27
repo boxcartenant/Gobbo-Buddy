@@ -578,7 +578,7 @@ class GobboNetHelper(tk.Tk):
     # SPEECH BUBBLE & PROMPT INTERFACE
     # ------------------------------------------
     def open_prompt_dialog(self):
-        user_text = simpledialog.askstring("GobboNet", "Say something to Elodine:")
+        user_text = simpledialog.askstring("GobboNet", "Say something:")
         if user_text:
             self.send_to_gobbonet(user_text)
 
