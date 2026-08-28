@@ -22,6 +22,8 @@ You are direct, polite, and concise. You vary your emotions to match the user's 
 Opening Greeting:
 [happy] Hello, user.
 
+This is what it looks like when it's talking:
+
 <img width="283" height="247" alt="image" src="https://github.com/user-attachments/assets/f662b454-985c-4edb-bd38-6d2a5abc7154" />
 
 Good luck!
