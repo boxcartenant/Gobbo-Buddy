@@ -1,28 +1,33 @@
-import json
+
 import os
+import json
 import queue
 import threading
 import tkinter as tk
 from tkinter import simpledialog
-import requests
-from PIL import Image, ImageTk
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-import uuid
 import time
+import traceback
 
-# ==========================================
+from pathlib import Path
+from PIL import Image, ImageTk
+
+
+# ============================================================
 # CONFIGURATION
-# ==========================================
-SPRITE_SHEET_PATH = "gobbo sprites 2.png"  # Path to your sprite sheet
+# ============================================================
+
+SPRITE_SHEET_PATH = "gobbo sprites 2.png"
+
 ROWS = 3
 COLS = 4
 
-# Map emotion tags to grid coordinates (row, col) - 0-indexed
 EMOTION_MAP = {
     "neutral": (0, 0),
     "happy": (0, 1),
+    "joking": (0, 1),
     "curious": (0, 2),
     "snarky": (0, 3),
+    "sarcastic": (0, 3),
     "excited": (1, 0),
     "skeptical": (1, 1),
     "judging": (1, 2),
@@ -36,408 +41,1543 @@ EMOTION_MAP = {
 DEFAULT_EMOTION = "neutral"
 TRANSPARENT_COLOR = "#15181D"
 
-# API Settings for GobboNet
-GOBBONET_API_URL = "http://127.0.0.1:9066/llm/v1/chat/completions"
-CHARACTER_NAME = "Fumo"
-THREAD_ID = None
-GOBBONET_LOGIN_URL = "http://127.0.0.1:9066/login"
+
+# ============================================================
+# GOBBONET
+# ============================================================
+
+GOBBONET_BASE_URL = "http://127.0.0.1:9066"
 GOBBONET_PASSWORD = "YOUR PASSWORD"
 
-#bridge stuff
-GOBBO_BRIDGE_PORT = 8765
-GOBBO_BRIDGE_LOCK = threading.Lock()
-GOBBO_COMMAND_QUEUE = []
-GOBBO_RESULT_QUEUE = []
+CHARACTER_NAME = "Fumo"
+BUDDY_THREAD_NAME = "GobboBuddy"
 
-# ==========================================
-# Bridge to JS
-# ==========================================
-class GobboBridgeHandler(BaseHTTPRequestHandler):
+GENERATION_TIMEOUT = 600
+PAGE_READY_TIMEOUT = 60
 
-    # ==========================================================
-    # RESPONSE HELPERS
-    # ==========================================================
-
-    def _send_json(self, status, data):
-
-        body = json.dumps(data).encode("utf-8")
-
-        #print(
-        #    f"[GobboBridge HTTP] "
-        #    f"RESPONSE {status}: {data}",
-        #    flush=True
-        #)
-
-        self.send_response(status)
-
-        self.send_header(
-            "Content-Type",
-            "application/json; charset=utf-8"
-        )
-
-        # Allow GobboNet's browser page to communicate with us.
-        self.send_header(
-            "Access-Control-Allow-Origin",
-            "*"
-        )
-
-        self.send_header(
-            "Cache-Control",
-            "no-store"
-        )
-
-        self.send_header(
-            "Content-Length",
-            str(len(body))
-        )
-
-        self.end_headers()
-
-        self.wfile.write(body)
+STATE_EXPORT_PATH = Path("gobbonet-state-export.json")
 
 
-    # ==========================================================
-    # CORS / PRIVATE NETWORK ACCESS
-    # ==========================================================
+# ============================================================
+# HEADLESS GOBBONET BRIDGE
+# ============================================================
 
-    def do_OPTIONS(self):
+class GobboNetBrowserBridge:
 
-        #print(
-        #    "[GobboBridge HTTP] OPTIONS",
-        #    self.path,
-        #    flush=True
-        #)
+    def __init__(self):
+        self._cmd_q = queue.Queue()
+        self._worker = None
+        self._started = threading.Event()
+        self._start_error = None
+        self._alive = False
 
-        self.send_response(204)
+        # Owned exclusively by worker thread
+        self._playwright = None
+        self._browser = None
+        self._context = None
+        self._page = None
+        self._gobbonet_thread_id = None
 
-        self.send_header(
-            "Access-Control-Allow-Origin",
-            "*"
-        )
+    # --------------------------------------------------------
+    # PUBLIC API
+    # --------------------------------------------------------
 
-        self.send_header(
-            "Access-Control-Allow-Methods",
-            "GET, POST, OPTIONS"
-        )
+    def start(self):
+        if self._worker and self._worker.is_alive():
+            self._started.wait(timeout=PAGE_READY_TIMEOUT + 30)
 
-        self.send_header(
-            "Access-Control-Allow-Headers",
-            "Content-Type"
-        )
-
-        # Chromium can require this when a web page makes a
-        # request to a local/private-network HTTP server.
-        self.send_header(
-            "Access-Control-Allow-Private-Network",
-            "true"
-        )
-
-        self.send_header(
-            "Content-Length",
-            "0"
-        )
-
-        self.end_headers()
-
-
-    # ==========================================================
-    # GET
-    # ==========================================================
-
-    def do_GET(self):
-
-        #print(
-        #    f"[GobboBridge HTTP] GET {self.path}",
-        #    flush=True
-        #)
-
-
-        # ------------------------------------------------------
-        # /command
-        #
-        # GobboNet polls this endpoint looking for work.
-        # ------------------------------------------------------
-
-        if self.path.startswith("/command"):
-
-            with GOBBO_BRIDGE_LOCK:
-
-                if GOBBO_COMMAND_QUEUE:
-
-                    command = GOBBO_COMMAND_QUEUE.pop(0)
-
-                    #print(
-                    #    "[GobboBridge] "
-                    #    ">>> GIVING COMMAND TO GOBBONET:",
-                    #    command,
-                    #    flush=True
-                    #)
-
-                else:
-
-                    command = {}
-
-
-            self._send_json(
-                200,
-                command
-            )
+            if self._start_error:
+                raise RuntimeError(self._start_error)
 
             return
 
+        self._started.clear()
+        self._start_error = None
+        self._alive = True
 
-        # ------------------------------------------------------
-        # /result
-        #
-        # Kept as GET for debugging/manual inspection.
-        # Normal operation uses POST /result.
-        # ------------------------------------------------------
-
-        if self.path.startswith("/result"):
-
-            with GOBBO_BRIDGE_LOCK:
-
-                if GOBBO_RESULT_QUEUE:
-
-                    result = GOBBO_RESULT_QUEUE.pop(0)
-
-                    #print(
-                    #    "[GobboBridge] "
-                    #    "<<< GIVING RESULT:",
-                    #    result,
-                    #    flush=True
-                    #)
-
-                else:
-
-                    result = {}
-
-
-            self._send_json(
-                200,
-                result
-            )
-
-            return
-
-
-        # ------------------------------------------------------
-        # /health
-        # ------------------------------------------------------
-
-        if self.path.startswith("/health"):
-
-            self._send_json(
-                200,
-                {
-                    "ok": True,
-                    "server": "GobboBridge"
-                }
-            )
-
-            return
-
-
-        # ------------------------------------------------------
-        # Unknown endpoint.
-        # ------------------------------------------------------
-
-        self._send_json(
-            404,
-            {
-                "error": "not found"
-            }
+        self._worker = threading.Thread(
+            target=self._worker_main,
+            name="GobboNetBridge",
+            daemon=True,
         )
 
+        self._worker.start()
 
-    # ==========================================================
-    # POST
-    # ==========================================================
+        self._started.wait(timeout=PAGE_READY_TIMEOUT + 30)
 
-    def do_POST(self):
+        if self._start_error:
+            raise RuntimeError(self._start_error)
 
-        #print(
-        #    f"[GobboBridge HTTP] POST {self.path}",
-        #    flush=True
-        #)
+        if not self._started.is_set():
+            raise RuntimeError(
+                "GobboNet bridge failed to start in time"
+            )
 
+    def stop(self):
+        self._alive = False
 
-        # ------------------------------------------------------
-        # Read request body.
-        # ------------------------------------------------------
+        done = queue.Queue()
 
         try:
+            self._cmd_q.put(
+                ("stop", None, done),
+                timeout=1,
+            )
+        except Exception:
+            pass
 
-            content_length = int(
-                    self.headers.get(
-                        "Content-Length",
-                        "0"
+        try:
+            done.get(timeout=10)
+        except Exception:
+            pass
+
+    def send_message(self, prompt_text):
+        self.start()
+
+        done = queue.Queue()
+
+        self._cmd_q.put(
+            ("send", prompt_text, done)
+        )
+
+        ok, payload = done.get(
+            timeout=GENERATION_TIMEOUT + 60
+        )
+
+        if not ok:
+            raise RuntimeError(payload)
+
+        return payload
+
+    def ensure_card_and_thread(self):
+        self.start()
+
+        done = queue.Queue()
+
+        self._cmd_q.put(
+            ("setup", None, done)
+        )
+
+        ok, payload = done.get(timeout=60)
+
+        if not ok:
+            raise RuntimeError(payload)
+
+        return payload
+
+    # --------------------------------------------------------
+    # WORKER
+    # --------------------------------------------------------
+
+    def _worker_main(self):
+        try:
+            self._boot_browser()
+
+            self._started.set()
+
+        except Exception as e:
+            self._start_error = (
+                f"{e}\n{traceback.format_exc()}"
+            )
+
+            self._started.set()
+            return
+
+        while self._alive:
+
+            try:
+                cmd, arg, done = self._cmd_q.get(
+                    timeout=0.5
+                )
+
+            except queue.Empty:
+                continue
+
+            try:
+
+                if cmd == "stop":
+                    self._shutdown_browser()
+                    done.put((True, None))
+                    break
+
+                if cmd == "setup":
+                    result = self._ensure_card_and_thread()
+                    done.put((True, result))
+
+                elif cmd == "send":
+                    result = self._send_message_impl(arg)
+                    done.put((True, result))
+
+                else:
+                    done.put(
+                        (
+                            False,
+                            f"Unknown command: {cmd}",
+                        )
+                    )
+
+            except Exception as e:
+                done.put(
+                    (
+                        False,
+                        f"{e}\n{traceback.format_exc()}",
                     )
                 )
 
+        self._alive = False
 
-            body = self.rfile.read(
-                    content_length
-                )
+    # --------------------------------------------------------
+    # BROWSER STARTUP
+    # --------------------------------------------------------
 
+    def _boot_browser(self):
 
-            body_text = body.decode(
-                    "utf-8",
-                    errors="replace"
-                )
+        try:
+            from playwright.sync_api import sync_playwright
 
+        except ImportError as e:
 
-            #print(
-            #    "[GobboBridge HTTP] BODY:",
-            #    body_text,
-            #    flush=True
-            #)
+            raise RuntimeError(
+                "Playwright is required.\n"
+                "pip install playwright\n"
+                "playwright install chromium\n"
+                f"Original error: {e}"
+            ) from e
 
-
-            data = json.loads(
-                    body_text
-                )
-
-
-        except Exception as error:
-
-            print(
-                "[GobboBridge] "
-                "!!! BAD REQUEST:",
-                repr(error),
-                flush=True
-            )
-
-
-            self._send_json(
-                400,
-                {
-                    "ok": False,
-                    "error": str(error)
-                }
-            )
-
-            return
-
-
-        # ------------------------------------------------------
-        # /result
-        #
-        # GobboNet posts completed responses here.
-        # ------------------------------------------------------
-
-        if self.path == "/result":
-
-            with GOBBO_BRIDGE_LOCK:
-
-                GOBBO_RESULT_QUEUE.append(
-                    data
-                )
-
-
-            #print(
-            #    "[GobboBridge] "
-            #    "<<< RECEIVED RESULT:",
-            #    data,
-            #    flush=True
-            #)
-
-
-            #print(
-            #    "[GobboBridge] "
-            #    "Result queue length:",
-            #    len(GOBBO_RESULT_QUEUE),
-            #    flush=True
-            #)
-
-
-            self._send_json(
-                200,
-                {
-                    "ok": True
-                }
-            )
-
-            return
-
-
-        # ------------------------------------------------------
-        # /heartbeat
-        #
-        # Intentionally removed.
-        # We don't need a heartbeat now that the bridge works.
-        # ------------------------------------------------------
-
-        if self.path == "/heartbeat":
-
-            self._send_json(
-                410,
-                {
-                    "ok": False,
-                    "error": "heartbeat disabled"
-                }
-            )
-
-            return
-
-
-        # ------------------------------------------------------
-        # Unknown endpoint.
-        # ------------------------------------------------------
-
-        self._send_json(
-            404,
-            {
-                "error": "not found"
-            }
+        print(
+            "[Bridge] Starting headless Chromium…",
+            flush=True,
         )
 
+        self._playwright = sync_playwright().start()
 
-    # ==========================================================
-    # HTTP LOGGING
-    # ==========================================================
+        self._browser = self._playwright.chromium.launch(
+            channel="msedge",
+            headless=True,
+            args=[
+                "--disable-gpu",
+                "--no-sandbox",
+                "--disable-dev-shm-usage",
+            ],
+        )
 
-    def log_message(self, format, *args):
-        None
-        #print(
-        #    "[GobboBridge HTTP]",
-        #    format % args,
-        #    flush=True
-        #)
+        self._context = self._browser.new_context(
+            viewport={
+                "width": 1280,
+                "height": 800,
+            },
+            user_agent=(
+                "GobboBuddy/2.0 "
+                "(headless Chromium; GobboNet client)"
+            ),
+        )
 
-# ==========================================
-# MAIN APPLICATION
-# ==========================================
+        self._page = self._context.new_page()
+
+        self._page.set_default_timeout(
+            PAGE_READY_TIMEOUT * 1000
+        )
+
+        # ----------------------------------------------------
+        # Browser diagnostics
+        # ----------------------------------------------------
+
+        self._page.on(
+            "console",
+            lambda msg: print(
+                f"[Browser console:{msg.type}] {msg.text}",
+                flush=True,
+            ),
+        )
+
+        self._page.on(
+            "requestfailed",
+            lambda request: print(
+                f"[Browser REQUEST FAILED] "
+                f"{request.method} "
+                f"{request.url} → "
+                f"{request.failure}",
+                flush=True,
+            ),
+        )
+
+        self._page.on(
+            "framenavigated",
+            lambda frame: (
+                print(
+                    f"[Browser NAV] {frame.url}",
+                    flush=True,
+                )
+                if frame == self._page.main_frame
+                else None
+            ),
+        )
+
+        # ----------------------------------------------------
+        # Login
+        # ----------------------------------------------------
+
+        self._open_and_login()
+
+        # ----------------------------------------------------
+        # Import the actual GobboNet state
+        # ----------------------------------------------------
+
+        self._import_gobbonet_state()
+
+        # ----------------------------------------------------
+        # Reload so GobboNet's OWN boot code consumes it
+        # ----------------------------------------------------
+
+        print(
+            "[Bridge] Reloading GobboNet after state import…",
+            flush=True,
+        )
+
+        self._page.reload(
+            wait_until="domcontentloaded"
+        )
+
+        # ----------------------------------------------------
+        # Wait for native application
+        # ----------------------------------------------------
+
+        self._wait_for_app_ready()
+
+        self._inspect_browser_state()
+
+        print(
+            "[Bridge] GobboNet page ready.",
+            flush=True,
+        )
+
+    # --------------------------------------------------------
+    # LOGIN
+    # --------------------------------------------------------
+
+    def _open_and_login(self):
+
+        page = self._page
+
+        url = (
+            GOBBONET_BASE_URL.rstrip("/")
+            + "/"
+        )
+
+        print(
+            f"[Bridge] Navigating to {url}",
+            flush=True,
+        )
+
+        page.goto(
+            url,
+            wait_until="domcontentloaded",
+        )
+
+        max_attempts = 3
+
+        for attempt in range(max_attempts):
+
+            if page.locator(
+                "#msg-input"
+            ).count() > 0:
+
+                print(
+                    "[Bridge] Chat UI detected.",
+                    flush=True,
+                )
+
+                return
+
+            password = page.locator(
+                'input[name="password"]'
+            )
+
+            if password.count() > 0:
+
+                print(
+                    f"[Bridge] Login page detected; "
+                    f"submitting password "
+                    f"(attempt {attempt + 1}/{max_attempts})…",
+                    flush=True,
+                )
+
+                password.fill(
+                    GOBBONET_PASSWORD
+                )
+
+                submit = page.locator(
+                    'button[type="submit"]'
+                )
+
+                if submit.count() > 0:
+                    submit.click()
+
+                else:
+
+                    submit = page.locator(
+                        'input[type="submit"]'
+                    )
+
+                    if submit.count() > 0:
+                        submit.click()
+
+                    else:
+                        password.press("Enter")
+
+                print(
+                    "[Bridge] Login submitted.",
+                    flush=True,
+                )
+
+                try:
+                    page.wait_for_load_state(
+                        "domcontentloaded",
+                        timeout=10000,
+                    )
+                except Exception:
+                    pass
+
+                time.sleep(1)
+
+                if page.locator(
+                    'input[name="password"]'
+                ).count() > 0:
+
+                    print(
+                        "[Bridge] Login still present.",
+                        flush=True,
+                    )
+
+                    continue
+
+                print(
+                    "[Bridge] Login appears successful.",
+                    flush=True,
+                )
+
+                return
+
+            time.sleep(0.5)
+
+        raise RuntimeError(
+            "GobboNet login failed after "
+            f"{max_attempts} attempts."
+        )
+
+    # --------------------------------------------------------
+    # STATE IMPORT
+    # --------------------------------------------------------
+    
+    def _import_gobbonet_state(self):
+        """
+        Import the exported GobboNet IndexedDB state into the headless
+        browser's gobbonet-state database.
+
+        IMPORTANT:
+            The meta store uses an OUT-OF-LINE key:
+                meta.put(app_record, "app")
+
+            The other stores use inline keyPaths:
+                telemetry -> turn_id
+                threads   -> id
+                vectors   -> hash
+        """
+
+        export_path = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)),
+            "gobbonet-state-export.json",
+        )
+
+        if not os.path.exists(export_path):
+            raise RuntimeError(
+                f"GobboNet state export not found:\n{export_path}"
+            )
+
+        print("[Bridge] Loading GobboNet state export…", flush=True)
+
+        import json
+
+        with open(export_path, "r", encoding="utf-8") as f:
+            exported = json.load(f)
+
+        # ------------------------------------------------------------
+        # Validate the basic export structure.
+        # ------------------------------------------------------------
+
+        database = exported.get("database", {})
+        stores = exported.get("stores", {})
+
+        print(
+            f"[Bridge] Export database: "
+            f"{database.get('name')} v{database.get('version')}",
+            flush=True,
+        )
+
+        if database.get("name") != "gobbonet-state":
+            raise RuntimeError(
+                f"Unexpected database name in export: "
+                f"{database.get('name')!r}"
+            )
+
+        if database.get("version") != 2:
+            raise RuntimeError(
+                f"Unexpected GobboNet database version: "
+                f"{database.get('version')!r}"
+            )
+
+        required_stores = {
+            "meta",
+            "telemetry",
+            "threads",
+            "vectors",
+        }
+
+        missing = required_stores - set(stores.keys())
+
+        if missing:
+            raise RuntimeError(
+                f"Export is missing IndexedDB stores: "
+                f"{', '.join(sorted(missing))}"
+            )
+
+        # ------------------------------------------------------------
+        # Find Fumo before touching the browser database.
+        # ------------------------------------------------------------
+
+        app_records = stores.get("meta", [])
+
+        app_record = None
+
+        for record in app_records:
+            if not isinstance(record, dict):
+                continue
+
+            # Our exporter represents the "app" record as either:
+            #
+            #   {"key": "app", "value": {...}}
+            #
+            # or potentially just the application object.
+            #
+            # Support both forms.
+
+            if record.get("key") == "app":
+                candidate = record.get("value")
+
+                if isinstance(candidate, dict):
+                    app_record = candidate
+                    break
+
+            if "characterCards" in record:
+                app_record = record
+                break
+
+        if not isinstance(app_record, dict):
+            raise RuntimeError(
+                "Could not find the GobboNet 'app' record in the export."
+            )
+
+        character_cards = app_record.get("characterCards") or []
+
+        fumo = None
+
+        for card in character_cards:
+            if (
+                isinstance(card, dict)
+                and str(card.get("name", "")).strip().lower()
+                == CHARACTER_NAME.strip().lower()
+            ):
+                fumo = card
+                break
+
+        if fumo is None:
+            names = [
+                card.get("name")
+                for card in character_cards
+                if isinstance(card, dict)
+            ]
+
+            raise RuntimeError(
+                f"Character card '{CHARACTER_NAME}' not found in export "
+                f"(have: {names})"
+            )
+
+        print(
+            f"[Bridge] Export contains character card "
+            f"'{fumo.get('name')}' ({fumo.get('id')}).",
+            flush=True,
+        )
+
+        # ------------------------------------------------------------
+        # Send the complete export into the browser.
+        # ------------------------------------------------------------
+
+        result = self._page.evaluate(
+            """
+            async (exported) => {
+
+                const DB_NAME = "gobbonet-state";
+
+                function requestToPromise(request) {
+                    return new Promise((resolve, reject) => {
+                        request.onsuccess = () => resolve(request.result);
+                        request.onerror = () => reject(request.error);
+                    });
+                }
+
+                function transactionToPromise(tx) {
+                    return new Promise((resolve, reject) => {
+                        tx.oncomplete = () => resolve();
+                        tx.onerror = () => reject(tx.error);
+                        tx.onabort = () =>
+                            reject(tx.error || new Error("Transaction aborted"));
+                    });
+                }
+
+                const stores = exported.stores || {};
+
+                // ----------------------------------------------------
+                // Open the EXISTING GobboNet database.
+                // Do NOT recreate it.
+                // ----------------------------------------------------
+
+                const db = await new Promise((resolve, reject) => {
+                    const req = indexedDB.open(DB_NAME);
+
+                    req.onsuccess = () => resolve(req.result);
+                    req.onerror = () => reject(req.error);
+                });
+
+                const result = {
+                    databaseName: db.name,
+                    version: db.version,
+                    stores: Array.from(db.objectStoreNames),
+                    imported: {}
+                };
+
+                // ----------------------------------------------------
+                // Verify the schema we're expecting.
+                // ----------------------------------------------------
+
+                const expected = {
+                    meta: null,
+                    telemetry: "turn_id",
+                    threads: "id",
+                    vectors: "hash"
+                };
+
+                for (const [storeName, expectedKeyPath] of Object.entries(expected)) {
+
+                    if (!db.objectStoreNames.contains(storeName)) {
+                        throw new Error(
+                            `IndexedDB store '${storeName}' does not exist`
+                        );
+                    }
+
+                    const tx = db.transaction(storeName, "readonly");
+                    const store = tx.objectStore(storeName);
+
+                    if (store.keyPath !== expectedKeyPath) {
+                        throw new Error(
+                            `Unexpected keyPath for ${storeName}: ` +
+                            `${JSON.stringify(store.keyPath)} ` +
+                            `(expected ${JSON.stringify(expectedKeyPath)})`
+                        );
+                    }
+                }
+
+                // ----------------------------------------------------
+                // Import everything in ONE transaction.
+                // ----------------------------------------------------
+
+                const tx = db.transaction(
+                    ["meta", "telemetry", "threads", "vectors"],
+                    "readwrite"
+                );
+
+                const metaStore = tx.objectStore("meta");
+                const telemetryStore = tx.objectStore("telemetry");
+                const threadsStore = tx.objectStore("threads");
+                const vectorsStore = tx.objectStore("vectors");
+
+                // ----------------------------------------------------
+                // META
+                //
+                // This is the critical part.
+                //
+                // meta has keyPath === null, so the key MUST be
+                // supplied explicitly.
+                // ----------------------------------------------------
+
+                let metaRecords = stores.meta || [];
+
+                for (const record of metaRecords) {
+
+                    let key = null;
+                    let value = record;
+
+                    if (
+                        record &&
+                        typeof record === "object" &&
+                        Object.prototype.hasOwnProperty.call(record, "key") &&
+                        Object.prototype.hasOwnProperty.call(record, "value")
+                    ) {
+                        key = record.key;
+                        value = record.value;
+                    }
+
+                    if (key === null || key === undefined) {
+                        // GobboNet's app record is stored under "app".
+                        if (
+                            value &&
+                            typeof value === "object" &&
+                            Object.prototype.hasOwnProperty.call(
+                                value,
+                                "characterCards"
+                            )
+                        ) {
+                            key = "app";
+                        }
+                    }
+
+                    if (key === null || key === undefined) {
+                        throw new Error(
+                            "Could not determine IndexedDB key for a meta record"
+                        );
+                    }
+
+                    metaStore.put(value, key);
+                    result.imported.meta =
+                        (result.imported.meta || 0) + 1;
+                }
+
+                // ----------------------------------------------------
+                // TELEMETRY
+                //
+                // keyPath = turn_id
+                // ----------------------------------------------------
+
+                for (const record of (stores.telemetry || [])) {
+                    if (!record || record.turn_id === undefined) {
+                        console.warn(
+                            "[GobboBuddy] Skipping telemetry record " +
+                            "without turn_id"
+                        );
+                        continue;
+                    }
+
+                    telemetryStore.put(record);
+                    result.imported.telemetry =
+                        (result.imported.telemetry || 0) + 1;
+                }
+
+                // ----------------------------------------------------
+                // THREADS
+                //
+                // keyPath = id
+                // ----------------------------------------------------
+
+                for (const record of (stores.threads || [])) {
+                    if (!record || record.id === undefined) {
+                        console.warn(
+                            "[GobboBuddy] Skipping thread without id"
+                        );
+                        continue;
+                    }
+
+                    threadsStore.put(record);
+                    result.imported.threads =
+                        (result.imported.threads || 0) + 1;
+                }
+
+                // ----------------------------------------------------
+                // VECTORS
+                //
+                // keyPath = hash
+                // ----------------------------------------------------
+
+                for (const record of (stores.vectors || [])) {
+                    if (!record || record.hash === undefined) {
+                        console.warn(
+                            "[GobboBuddy] Skipping vector without hash"
+                        );
+                        continue;
+                    }
+
+                    vectorsStore.put(record);
+                    result.imported.vectors =
+                        (result.imported.vectors || 0) + 1;
+                }
+
+                await transactionToPromise(tx);
+
+                db.close();
+
+                return result;
+            }
+            """,
+            exported,
+        )
+
+        print(
+            f"[Bridge] IndexedDB import complete: {result}",
+            flush=True,
+        )
+
+        # ------------------------------------------------------------
+        # Give GobboNet a chance to notice the imported state.
+        # ------------------------------------------------------------
+
+        print(
+            "[Bridge] Reloading GobboNet so its JS state is rebuilt "
+            "from the imported database…",
+            flush=True,
+        )
+
+        self._page.reload(wait_until="domcontentloaded")
+
+        self._page.wait_for_selector(
+            "#msg-input",
+            timeout=PAGE_READY_TIMEOUT * 1000,
+        )
+
+        self._page.wait_for_function(
+            """() => {
+                return typeof sendMessage === 'function'
+                    && typeof getActiveThread === 'function'
+                    && typeof state === 'object'
+                    && state !== null
+                    && Array.isArray(state.characterCards);
+            }""",
+            timeout=PAGE_READY_TIMEOUT * 1000,
+        )
+
+        time.sleep(1.0)
+
+        # ------------------------------------------------------------
+        # Verify what GobboNet itself sees.
+        # ------------------------------------------------------------
+
+        verification = self._page.evaluate(
+            """() => ({
+                activeCardId: state.activeCardId || null,
+                activeThreadId: state.activeThreadId || null,
+                characterCards: (state.characterCards || []).map(c => ({
+                    id: c.id,
+                    name: c.name
+                })),
+                threadCount: (state.threads || []).length,
+                threadOrder: state.threadOrder || []
+            })"""
+        )
+
+        print(
+            "[Bridge] GobboNet state after import:",
+            flush=True,
+        )
+        print(
+            f"[Bridge]   activeCardId: "
+            f"{verification.get('activeCardId')}",
+            flush=True,
+        )
+        print(
+            f"[Bridge]   activeThreadId: "
+            f"{verification.get('activeThreadId')}",
+            flush=True,
+        )
+        print(
+            f"[Bridge]   characterCards: "
+            f"{verification.get('characterCards')}",
+            flush=True,
+        )
+        print(
+            f"[Bridge]   threadCount: "
+            f"{verification.get('threadCount')}",
+            flush=True,
+        )
+        print(
+            f"[Bridge]   threadOrder: "
+            f"{verification.get('threadOrder')}",
+            flush=True,
+        )
+
+        names = [
+            c.get("name")
+            for c in verification.get("characterCards", [])
+        ]
+
+        if CHARACTER_NAME.lower() not in [
+            str(name).lower() for name in names
+        ]:
+            raise RuntimeError(
+                f"IndexedDB import completed, but GobboNet JS still "
+                f"does not see character '{CHARACTER_NAME}'. "
+                f"Characters visible to JS: {names}"
+            )
+
+        print(
+            f"[Bridge] SUCCESS: GobboNet itself sees '{CHARACTER_NAME}'.",
+            flush=True,
+        )
+
+    # --------------------------------------------------------
+    # WAIT FOR GOBBONET
+    # --------------------------------------------------------
+
+    def _wait_for_app_ready(self):
+
+        page = self._page
+
+        print(
+            "[Bridge] Waiting for chat input…",
+            flush=True,
+        )
+
+        page.wait_for_selector(
+            "#msg-input",
+            timeout=PAGE_READY_TIMEOUT * 1000,
+        )
+
+        print(
+            "[Bridge] #msg-input attached.",
+            flush=True,
+        )
+
+        print(
+            "[Bridge] Waiting for GobboNet JS "
+            "application functions…",
+            flush=True,
+        )
+
+        page.wait_for_function(
+            """
+            () => {
+                return (
+                    typeof sendMessage === "function"
+                    &&
+                    typeof getActiveThread === "function"
+                    &&
+                    typeof state === "object"
+                    &&
+                    state !== null
+                    &&
+                    Array.isArray(
+                        state.characterCards
+                    )
+                );
+            }
+            """,
+            timeout=PAGE_READY_TIMEOUT * 1000,
+        )
+
+        print(
+            "[Bridge] GobboNet JS application ready.",
+            flush=True,
+        )
+
+        time.sleep(1)
+
+    # --------------------------------------------------------
+    # STATE INSPECTION
+    # --------------------------------------------------------
+
+    def _inspect_browser_state(self):
+
+        print(
+            "[Bridge] Inspecting GobboNet browser state…",
+            flush=True,
+        )
+
+        result = self._page.evaluate(
+            """
+            () => {
+
+                const cards =
+                    Array.isArray(
+                        state.characterCards
+                    )
+                        ? state.characterCards
+                        : [];
+
+                return {
+                    activeCardId:
+                        state.activeCardId,
+
+                    activeThreadId:
+                        state.activeThreadId,
+
+                    threadOrder:
+                        state.threadOrder,
+
+                    characterCards:
+                        cards.map(c => ({
+                            id: c.id,
+                            name: c.name
+                        }))
+                };
+            }
+            """
+        )
+
+        print(
+            "[Bridge] activeCardId:",
+            result.get("activeCardId"),
+            flush=True,
+        )
+
+        print(
+            "[Bridge] activeThreadId:",
+            result.get("activeThreadId"),
+            flush=True,
+        )
+
+        print(
+            "[Bridge] threadOrder:",
+            result.get("threadOrder"),
+            flush=True,
+        )
+
+        print(
+            "[Bridge] Character cards:",
+            result.get("characterCards"),
+            flush=True,
+        )
+
+    # --------------------------------------------------------
+    # CARD + THREAD
+    # --------------------------------------------------------
+
+    def _ensure_card_and_thread(self):
+
+        result = self._page.evaluate(
+            """
+            ({ characterName, existingThreadId }) => {
+
+                const cards = state.characterCards || [];
+
+                const card = cards.find(
+                    c =>
+                        (c.name || "").toLowerCase()
+                        === characterName.toLowerCase()
+                );
+
+                if (!card) {
+                    return {
+                        ok: false,
+                        error:
+                            "Character card not found: "
+                            + characterName
+                            + " (have: "
+                            + cards.map(c => c.name).join(", ")
+                            + ")"
+                    };
+                }
+
+                // Always make Fumo the active card.
+                if (state.activeCardId !== card.id) {
+                    if (typeof activateCard === "function") {
+                        activateCard(card.id);
+                    } else {
+                        state.activeCardId = card.id;
+                        saveState();
+                    }
+                }
+
+                /*
+                 * If GobboBuddy already has a thread, verify that GobboNet
+                 * still has it. If it does, simply switch back to it.
+                 */
+                if (existingThreadId) {
+
+                    const existing =
+                        state.threads.find(
+                            t => t.id === existingThreadId
+                        );
+
+                    if (existing) {
+
+                        if (
+                            state.activeThreadId
+                            !== existingThreadId
+                        ) {
+                            switchThread(existingThreadId);
+                        }
+
+                        return {
+                            ok: true,
+                            cardId: card.id,
+                            cardName: card.name,
+                            threadId: existingThreadId,
+                            created: false
+                        };
+                    }
+                }
+
+                /*
+                 * No GobboBuddy thread exists yet.
+                 *
+                 * Let GobboNet create it through its own native function.
+                 */
+                if (typeof createThread !== "function") {
+                    return {
+                        ok: false,
+                        error: "createThread() not available"
+                    };
+                }
+
+                createThread();
+
+                const thread = getActiveThread();
+
+                if (!thread) {
+                    return {
+                        ok: false,
+                        error:
+                            "createThread() produced no active thread"
+                    };
+                }
+
+                return {
+                    ok: true,
+                    cardId: card.id,
+                    cardName: card.name,
+                    threadId: thread.id,
+                    created: true
+                };
+            }
+            """,
+            {
+                "characterName": CHARACTER_NAME,
+                "existingThreadId": self._gobbonet_thread_id,
+            },
+        )
+
+        if not result or not result.get("ok"):
+            err = (
+                result or {}
+            ).get(
+                "error"
+            ) or "unknown error"
+
+            raise RuntimeError(
+                f"GobboNet setup failed: {err}"
+            )
+
+        self._gobbonet_thread_id = result["threadId"]
+
+        action = (
+            "created"
+            if result.get("created")
+            else "selected"
+        )
+
+        print(
+            f"[Bridge] Card "
+            f"'{result.get('cardName')}' active; "
+            f"thread {action}: "
+            f"{result.get('threadId')}",
+            flush=True,
+        )
+
+        return result
+
+    # --------------------------------------------------------
+    # SEND MESSAGE
+    # --------------------------------------------------------
+
+    def _send_message_impl(self, prompt_text):
+
+        self._ensure_card_and_thread()
+
+        page = self._page
+
+        before = page.evaluate(
+            """
+            () => {
+
+                const t =
+                    getActiveThread();
+
+                if (!t) {
+                    return {
+                        count: 0,
+                        lastAssistant: ""
+                    };
+                }
+
+                const msgs =
+                    t.messages || [];
+
+                let last = "";
+
+                for (
+                    let i = msgs.length - 1;
+                    i >= 0;
+                    i--
+                ) {
+
+                    if (
+                        msgs[i].role
+                        === "assistant"
+                        &&
+                        (msgs[i].content || "")
+                            .trim()
+                    ) {
+
+                        last =
+                            msgs[i].content;
+
+                        break;
+                    }
+                }
+
+                return {
+                    count: msgs.length,
+                    lastAssistant: last
+                };
+            }
+            """
+        )
+
+        print(
+            "[Bridge] Calling GobboNet's "
+            "native sendMessage()…",
+            flush=True,
+        )
+
+        page.evaluate(
+            """
+            (text) => {
+
+                if (
+                    typeof isGenerating
+                    !== "undefined"
+                    &&
+                    isGenerating
+                ) {
+                    throw new Error(
+                        "GobboNet is already generating"
+                    );
+                }
+
+                window.__gobboBuddySendError =
+                    null;
+
+                const p =
+                    sendMessage(text);
+
+                window.__gobboBuddySend =
+                    p;
+
+                if (
+                    p &&
+                    typeof p.catch
+                    === "function"
+                ) {
+
+                    p.catch(
+                        err => {
+
+                            console.error(
+                                "[GobboBuddy] "
+                                +
+                                "sendMessage error:",
+                                err
+                            );
+
+                            window
+                                .__gobboBuddySendError =
+                                String(
+                                    err &&
+                                    err.message
+                                    ||
+                                    err
+                                );
+                        }
+                    );
+                }
+            }
+            """,
+            prompt_text,
+        )
+
+        deadline = (
+            time.time()
+            +
+            GENERATION_TIMEOUT
+        )
+
+        last_log = 0
+
+        while time.time() < deadline:
+
+            status = page.evaluate(
+                """
+                () => {
+
+                    const generating =
+                        !!(
+                            typeof isGenerating
+                            !== "undefined"
+                            &&
+                            isGenerating
+                        );
+
+                    const err =
+                        window
+                            .__gobboBuddySendError
+                        ||
+                        null;
+
+                    const t =
+                        (
+                            typeof getActiveThread
+                            === "function"
+                        )
+                            ? getActiveThread()
+                            : null;
+
+                    const msgs =
+                        (
+                            t &&
+                            t.messages
+                        )
+                        ||
+                        [];
+
+                    let lastAssistant = "";
+
+                    for (
+                        let i =
+                            msgs.length - 1;
+                        i >= 0;
+                        i--
+                    ) {
+
+                        if (
+                            msgs[i].role
+                            === "assistant"
+                        ) {
+
+                            lastAssistant =
+                                msgs[i].content
+                                ||
+                                "";
+
+                            break;
+                        }
+                    }
+
+                    return {
+                        generating,
+                        err,
+                        count: msgs.length,
+                        lastAssistant,
+                        lastLen:
+                            lastAssistant.length
+                    };
+                }
+                """
+            )
+
+            if status.get("err"):
+
+                raise RuntimeError(
+                    "GobboNet sendMessage failed: "
+                    +
+                    status["err"]
+                )
+
+            if not status.get("generating"):
+
+                content = (
+                    status
+                        .get("lastAssistant")
+                        or ""
+                ).strip()
+
+                prev = (
+                    before
+                        .get("lastAssistant")
+                        or ""
+                ).strip()
+
+                if (
+                    content
+                    and content != prev
+                ):
+                    return content
+
+                if (
+                    status.get("count", 0)
+                    >
+                    before.get("count", 0)
+                    and content
+                ):
+                    return content
+
+                time.sleep(0.3)
+
+                status2 = page.evaluate(
+                    """
+                    () => {
+
+                        const t =
+                            getActiveThread();
+
+                        const msgs =
+                            (
+                                t &&
+                                t.messages
+                            )
+                            ||
+                            [];
+
+                        for (
+                            let i =
+                                msgs.length - 1;
+                            i >= 0;
+                            i--
+                        ) {
+
+                            if (
+                                msgs[i].role
+                                === "assistant"
+                            ) {
+
+                                return (
+                                    msgs[i].content
+                                    ||
+                                    ""
+                                ).trim();
+                            }
+                        }
+
+                        return "";
+                    }
+                    """
+                )
+
+                if (
+                    status2
+                    and status2 != prev
+                ):
+                    return status2
+
+                return (
+                    status2
+                    or content
+                    or ""
+                )
+
+            now = time.time()
+
+            if now - last_log > 5:
+
+                print(
+                    "[Bridge] generating… "
+                    f"({status.get('lastLen', 0)} "
+                    "chars so far)",
+                    flush=True,
+                )
+
+                last_log = now
+
+            time.sleep(0.2)
+
+        raise RuntimeError(
+            "GobboNet generation timed out after "
+            f"{GENERATION_TIMEOUT}s"
+        )
+
+    # --------------------------------------------------------
+    # SHUTDOWN
+    # --------------------------------------------------------
+
+    def _shutdown_browser(self):
+
+        for obj in (
+            self._page,
+            self._context,
+            self._browser,
+        ):
+
+            try:
+
+                if obj:
+                    obj.close()
+
+            except Exception:
+                pass
+
+        self._page = None
+        self._context = None
+        self._browser = None
+
+        if self._playwright:
+
+            try:
+                self._playwright.stop()
+
+            except Exception:
+                pass
+
+            self._playwright = None
+
+
+GOBBO_BRIDGE = GobboNetBrowserBridge()
+
+
+# ============================================================
+# TKINTER UI
+# ============================================================
+
 class GobboNetHelper(tk.Tk):
 
     def __init__(self):
+
         super().__init__()
 
-        # --- Window Setup ---
-        self.overrideredirect(True)  # Frameless
-        self.wm_attributes("-topmost", True)  # Always-on-top
-        self.wm_attributes("-transparentcolor", TRANSPARENT_COLOR)
-        self.configure(bg=TRANSPARENT_COLOR)
+        self.overrideredirect(True)
 
-        # --- Drag State ---
+        self.wm_attributes(
+            "-topmost",
+            True
+        )
+
+        self.wm_attributes(
+            "-transparentcolor",
+            TRANSPARENT_COLOR
+        )
+
+        self.configure(
+            bg=TRANSPARENT_COLOR
+        )
+
         self._drag_start_x = 0
         self._drag_start_y = 0
         self._is_dragging = False
 
-        # --- Queue & Threading Setup ---
         self.response_queue = queue.Queue()
+
         self.raw_stream_text = ""
+
         self.parsed_emotion = None
 
-        # --- Load Sprites ---
         self.sprites = {}
+
         self.load_sprite_sheet()
 
-        # --- Build UI Layout ---
-        self.container = tk.Frame(self, bg=TRANSPARENT_COLOR)
-        self.container.pack(fill="both", expand=True)
+        self.container = tk.Frame(
+            self,
+            bg=TRANSPARENT_COLOR
+        )
 
-        # Speech Bubble (Top)
+        self.container.pack(
+            fill="both",
+            expand=True
+        )
+
         self.bubble_frame = tk.Frame(
             self.container,
             bg="white",
@@ -445,116 +1585,228 @@ class GobboNetHelper(tk.Tk):
             highlightthickness=2,
             bd=0,
         )
+
         self.bubble_label = tk.Label(
             self.bubble_frame,
             text="",
             bg="white",
             fg="black",
             font=("Arial", 10),
-            wraplength=250,  # Auto-wraps long LLM responses
+            wraplength=250,
             justify="left",
             padx=10,
             pady=8,
         )
+
         self.bubble_label.pack()
+
         self.bubble_frame.pack_forget()
 
-        # Sprite Display (Bottom)
         self.sprite_label = tk.Label(
-            self.container, bg=TRANSPARENT_COLOR, bd=0, cursor="fleur"
+            self.container,
+            bg=TRANSPARENT_COLOR,
+            bd=0,
+            cursor="fleur",
         )
+
         self.sprite_label.pack()
 
-        # Set initial sprite image
         self.current_emotion = DEFAULT_EMOTION
-        self.update_sprite(DEFAULT_EMOTION)
 
-        # --- Event Bindings ---
-        self.sprite_label.bind("<ButtonPress-1>", self.on_press)
-        self.sprite_label.bind("<B1-Motion>", self.on_drag)
-        self.sprite_label.bind("<ButtonRelease-1>", self.on_release)
+        self.update_sprite(
+            DEFAULT_EMOTION
+        )
 
-        # Initial screen positioning
+        self.sprite_label.bind(
+            "<ButtonPress-1>",
+            self.on_press
+        )
+
+        self.sprite_label.bind(
+            "<B1-Motion>",
+            self.on_drag
+        )
+
+        self.sprite_label.bind(
+            "<ButtonRelease-1>",
+            self.on_release
+        )
+
         self.center_on_screen()
 
-        # Start Queue Polling for Streamed UI Updates
         self.check_queue()
 
-        # --- Animation Pipeline Placeholder ---
-        # NOTE: Commented out for now as requested.
-        # self.after(100, self.animation_tick)
+        self.protocol(
+            "WM_DELETE_WINDOW",
+            self.on_close
+        )
 
-    # ------------------------------------------
-    # SPRITE HANDLING
-    # ------------------------------------------
     def load_sprite_sheet(self):
-        """Cuts the 3x4 sprite sheet into individual PhotoImages mapped by emotion."""
-        if not os.path.exists(SPRITE_SHEET_PATH):
-            placeholder = Image.new("RGBA", (100, 100), color=(200, 200, 200))
-            self.placeholder_img = ImageTk.PhotoImage(placeholder)
-            for emotion in EMOTION_MAP:
-                self.sprites[emotion] = self.placeholder_img
-            print(
-                f"Warning: '{SPRITE_SHEET_PATH}' not found. Using placeholder graphics."
+
+        if not os.path.exists(
+            SPRITE_SHEET_PATH
+        ):
+
+            placeholder = Image.new(
+                "RGBA",
+                (100, 100),
+                color=(200, 200, 200),
             )
+
+            self.placeholder_img = (
+                ImageTk.PhotoImage(
+                    placeholder
+                )
+            )
+
+            for emotion in EMOTION_MAP:
+                self.sprites[emotion] = (
+                    self.placeholder_img
+                )
+
+            print(
+                f"Warning: "
+                f"'{SPRITE_SHEET_PATH}' "
+                "not found. "
+                "Using placeholder graphics.",
+                flush=True,
+            )
+
             return
 
-        sheet = Image.open(SPRITE_SHEET_PATH).convert("RGBA")
+        sheet = Image.open(
+            SPRITE_SHEET_PATH
+        ).convert("RGBA")
+
         sheet_w, sheet_h = sheet.size
+
         sprite_w = sheet_w // COLS
         sprite_h = sheet_h // ROWS
 
         for emotion, (row, col) in EMOTION_MAP.items():
+
             left = col * sprite_w
             top = row * sprite_h
             right = left + sprite_w
             bottom = top + sprite_h
 
-            cropped = sheet.crop((left, top, right, bottom))
-            resized = cropped.resize((130,170), Image.Resampling.LANCZOS)
-            self.sprites[emotion] = ImageTk.PhotoImage(resized)
+            cropped = sheet.crop(
+                (
+                    left,
+                    top,
+                    right,
+                    bottom,
+                )
+            )
+
+            resized = cropped.resize(
+                (130, 170),
+                Image.Resampling.LANCZOS,
+            )
+
+            self.sprites[emotion] = (
+                ImageTk.PhotoImage(
+                    resized
+                )
+            )
 
     def update_sprite(self, emotion):
-        """Switch current sprite based on emotion string."""
-        emotion = emotion.lower().strip()
-        if emotion in self.sprites:
-            self.current_emotion = emotion
-            self.sprite_label.config(image=self.sprites[emotion])
-        else:
-            self.sprite_label.config(image=self.sprites[DEFAULT_EMOTION])
 
-    # ------------------------------------------
-    # DRAG & CLICK & BOUNDARY CLAMPING
-    # ------------------------------------------
+        emotion = (
+            emotion
+            .lower()
+            .strip()
+        )
+
+        if emotion in self.sprites:
+
+            self.current_emotion = emotion
+
+            self.sprite_label.config(
+                image=self.sprites[emotion]
+            )
+
+        else:
+
+            self.sprite_label.config(
+                image=self.sprites[
+                    DEFAULT_EMOTION
+                ]
+            )
+
     def on_press(self, event):
+
         self._drag_start_x = event.x
         self._drag_start_y = event.y
         self._is_dragging = False
 
     def on_drag(self, event):
+
         if (
-            abs(event.x - self._drag_start_x) > 3
-            or abs(event.y - self._drag_start_y) > 3
+            abs(
+                event.x
+                -
+                self._drag_start_x
+            ) > 3
+            or
+            abs(
+                event.y
+                -
+                self._drag_start_y
+            ) > 3
         ):
+
             self._is_dragging = True
 
         if self._is_dragging:
-            x = self.winfo_x() + (event.x - self._drag_start_x)
-            y = self.winfo_y() + (event.y - self._drag_start_y)
-            self.geometry(f"+{x}+{y}")
+
+            x = (
+                self.winfo_x()
+                +
+                (
+                    event.x
+                    -
+                    self._drag_start_x
+                )
+            )
+
+            y = (
+                self.winfo_y()
+                +
+                (
+                    event.y
+                    -
+                    self._drag_start_y
+                )
+            )
+
+            self.geometry(
+                f"+{x}+{y}"
+            )
 
     def on_release(self, event):
+
         if self._is_dragging:
+
             self.clamp_to_screen_bounds()
+
             self._is_dragging = False
+
         else:
+
             self.open_prompt_dialog()
 
     def clamp_to_screen_bounds(self):
-        """Snaps the helper back inside screen boundaries if dragged off-screen."""
+
         self.update_idletasks()
-        screen_w = self.winfo_screenwidth()
-        screen_h = self.winfo_screenheight()
+
+        screen_w = (
+            self.winfo_screenwidth()
+        )
+
+        screen_h = (
+            self.winfo_screenheight()
+        )
 
         win_w = self.winfo_width()
         win_h = self.winfo_height()
@@ -562,179 +1814,198 @@ class GobboNetHelper(tk.Tk):
         x = self.winfo_x()
         y = self.winfo_y()
 
-        new_x = max(0, min(x, screen_w - win_w))
-        new_y = max(0, min(y, screen_h - win_h))
+        new_x = max(
+            0,
+            min(
+                x,
+                screen_w - win_w
+            )
+        )
 
-        if new_x != x or new_y != y:
-            self.geometry(f"+{new_x}+{new_y}")
+        new_y = max(
+            0,
+            min(
+                y,
+                screen_h - win_h
+            )
+        )
+
+        if (
+            new_x != x
+            or
+            new_y != y
+        ):
+
+            self.geometry(
+                f"+{new_x}+{new_y}"
+            )
 
     def center_on_screen(self):
-        self.update_idletasks()
-        sw = self.winfo_screenwidth()
-        sh = self.winfo_screenheight()
-        self.geometry(f"+{sw // 2 - 50}+{sh // 2 - 50}")
 
-    # ------------------------------------------
-    # SPEECH BUBBLE & PROMPT INTERFACE
-    # ------------------------------------------
+        self.update_idletasks()
+
+        sw = (
+            self.winfo_screenwidth()
+        )
+
+        sh = (
+            self.winfo_screenheight()
+        )
+
+        self.geometry(
+            f"+{sw // 2 - 50}"
+            f"+{sh // 2 - 50}"
+        )
+
     def open_prompt_dialog(self):
-        user_text = simpledialog.askstring("GobboNet", "Say something:")
+
+        user_text = simpledialog.askstring(
+            "GobboNet",
+            "Say something:"
+        )
+
         if user_text:
-            self.send_to_gobbonet(user_text)
+            self.send_to_gobbonet(
+                user_text
+            )
 
     def set_speech_bubble(self, text):
+
         if text.strip():
-            self.bubble_label.config(text=text)
-            self.bubble_frame.pack(side="top", pady=(0, 6), before=self.sprite_label)
+
+            self.bubble_label.config(
+                text=text
+            )
+
+            self.bubble_frame.pack(
+                side="top",
+                pady=(0, 6),
+                before=self.sprite_label,
+            )
+
         else:
+
             self.bubble_frame.pack_forget()
 
         self.clamp_to_screen_bounds()
 
-    # ------------------------------------------
-    # BACKEND STREAMING INTEGRATION
-    # ------------------------------------------
-    def send_to_gobbonet(self, prompt_text):
-        """Prepares state and spins off a thread to query GobboNet API."""
+    def send_to_gobbonet(
+        self,
+        prompt_text
+    ):
+
         self.raw_stream_text = ""
         self.parsed_emotion = None
 
-        # Immediate visual feedback
-        self.update_sprite("curious")
-        self.set_speech_bubble("...")
+        self.update_sprite(
+            "curious"
+        )
 
-        # Run network call in background thread
+        self.set_speech_bubble(
+            "..."
+        )
+
         threading.Thread(
-            target=self._stream_worker,
+            target=self._gobbo_worker,
             args=(prompt_text,),
-            daemon=True
+            daemon=True,
         ).start()
 
-
-    def _stream_worker(self, prompt_text):
-        """Send a message through the GobboNet browser bridge."""
-
-        command_id = str(uuid.uuid4())
-
-        command = {
-            "id": command_id,
-            "message": prompt_text,
-        }
+    def _gobbo_worker(
+        self,
+        prompt_text
+    ):
 
         print(
-            "\n[GobboBridge] ========================================",
-            flush=True
+            "\n[GobboBuddy] "
+            "========================================",
+            flush=True,
         )
-        #print("[GobboBridge] QUEUING COMMAND", flush=True)
-        #print("[GobboBridge] ID:", command_id, flush=True)
-        #print("[GobboBridge] Thread:", THREAD_ID, flush=True)
-        #print("[GobboBridge] Message:", prompt_text, flush=True)
-
-        with GOBBO_BRIDGE_LOCK:
-            GOBBO_COMMAND_QUEUE.append(command)
-
-            print(
-                "[GobboBridge] Queue length:",
-                len(GOBBO_COMMAND_QUEUE),
-                flush=True
-            )
 
         print(
-            "[GobboBridge] Waiting for GobboNet to poll /command...",
-            flush=True
+            "[GobboBuddy] MESSAGE:",
+            prompt_text,
+            flush=True,
         )
 
         started = time.time()
-        next_diagnostic = 5
 
-        while True:
+        try:
 
-            with GOBBO_BRIDGE_LOCK:
-
-                result = None
-
-                for i, candidate in enumerate(GOBBO_RESULT_QUEUE):
-
-                    if candidate.get("id") == command_id:
-                        result = GOBBO_RESULT_QUEUE.pop(i)
-                        break
-
-            if result is not None:
-
-                elapsed = time.time() - started
-
-                print(
-                    f"[GobboBridge] GOT RESULT after {elapsed:.2f}s:",
-                    result,
-                    flush=True
+            content = (
+                GOBBO_BRIDGE
+                .send_message(
+                    prompt_text
                 )
+            )
 
-                if result.get("ok"):
+            elapsed = (
+                time.time()
+                -
+                started
+            )
 
-                    content = result.get("content", "")
+            print(
+                f"[GobboBuddy] RESPONSE "
+                f"after {elapsed:.2f}s:",
+                content,
+                flush=True,
+            )
 
-                    print(
-                        "[GobboBridge] RESPONSE:",
-                        content,
-                        flush=True
-                    )
+            self.response_queue.put(
+                content
+            )
 
-                    self.response_queue.put(content)
+        except Exception as error:
 
-                else:
+            elapsed = (
+                time.time()
+                -
+                started
+            )
 
-                    error = result.get(
-                        "error",
-                        "unknown error"
-                    )
+            print(
+                f"[GobboBuddy] ERROR "
+                f"after {elapsed:.2f}s:",
+                repr(error),
+                flush=True,
+            )
 
-                    print(
-                        "[GobboBridge] GOBBONET ERROR:",
-                        error,
-                        flush=True
-                    )
-
-                    self.response_queue.put(
-                        f" [GOBBONET ERROR: {error}]"
-                    )
-
-                return
-
-            elapsed = time.time() - started
-
-            if elapsed >= next_diagnostic:
-
-                with GOBBO_BRIDGE_LOCK:
-                    queue_length = len(GOBBO_COMMAND_QUEUE)
-
-                print(
-                    f"[GobboBridge] Still waiting... "
-                    f"{elapsed:.0f}s | "
-                    f"command queue={queue_length}",
-                    flush=True
-                )
-
-                next_diagnostic += 5
-
-            time.sleep(0.05)
-
+            self.response_queue.put(
+                f"[GOBBONET ERROR: {error}]"
+            )
 
     def check_queue(self):
-        """Polls queue for incoming tokens and updates UI incrementally."""
+
         tokens_received = False
 
         while not self.response_queue.empty():
-            token = self.response_queue.get()
+
+            token = (
+                self.response_queue.get()
+            )
+
             self.raw_stream_text += token
+
             tokens_received = True
 
         if tokens_received:
-            clean_text = self.raw_stream_text.strip()
 
-            # Only attempt to parse the emotion once we actually have
-            # enough text to contain the first word.
-            if not self.parsed_emotion and " " in clean_text:
-                parts = clean_text.split(" ", 1)
+            clean_text = (
+                self.raw_stream_text
+                .strip()
+            )
+
+            if (
+                not self.parsed_emotion
+                and
+                " " in clean_text
+            ):
+
+                parts = clean_text.split(
+                    " ",
+                    1
+                )
 
                 candidate = (
                     parts[0]
@@ -745,46 +2016,100 @@ class GobboNetHelper(tk.Tk):
                 )
 
                 if candidate in EMOTION_MAP:
-                    self.parsed_emotion = candidate
-                    self.update_sprite(candidate)
-                    clean_text = parts[1]
-                else:
-                    self.parsed_emotion = DEFAULT_EMOTION
-                    self.update_sprite(DEFAULT_EMOTION)
 
-            elif self.parsed_emotion and " " in clean_text:
-                parts = clean_text.split(" ", 1)
+                    self.parsed_emotion = (
+                        candidate
+                    )
+
+                    self.update_sprite(
+                        candidate
+                    )
+
+                    clean_text = parts[1]
+
+                else:
+
+                    self.parsed_emotion = (
+                        DEFAULT_EMOTION
+                    )
+
+                    self.update_sprite(
+                        DEFAULT_EMOTION
+                    )
+
+            elif (
+                self.parsed_emotion
+                and
+                " " in clean_text
+            ):
+
+                parts = clean_text.split(
+                    " ",
+                    1
+                )
+
                 clean_text = parts[1]
 
-            self.set_speech_bubble(clean_text)
+            self.set_speech_bubble(
+                clean_text
+            )
 
-        self.after(50, self.check_queue)
+        self.after(
+            50,
+            self.check_queue
+        )
 
-    # ------------------------------------------
-    # ANIMATION TICK PLACEHOLDER
-    # ------------------------------------------
-    # def animation_tick(self):
-    #     self.after(100, self.animation_tick)
+    def on_close(self):
 
+        try:
+            GOBBO_BRIDGE.stop()
+
+        except Exception:
+            pass
+
+        self.destroy()
+
+
+# ============================================================
+# MAIN
+# ============================================================
 
 if __name__ == "__main__":
-    def start_gobbo_bridge():
-        server = ThreadingHTTPServer(
-            ("127.0.0.1", GOBBO_BRIDGE_PORT),
-            GobboBridgeHandler
-        )
 
-        threading.Thread(
-            target=server.serve_forever,
-            daemon=True
-        ).start()
+    try:
+
+        GOBBO_BRIDGE.start()
+
+        GOBBO_BRIDGE.ensure_card_and_thread()
+
+    except Exception as error:
 
         print(
-            f"GobboBridge listening on "
-            f"http://127.0.0.1:{GOBBO_BRIDGE_PORT}"
+            "[GobboBuddy] STARTUP ERROR:",
+            repr(error),
+            flush=True,
         )
 
-        return server
-    gobbo_bridge_server = start_gobbo_bridge()
+        print(
+            "\nMake sure:\n"
+            "  1. GobboNet is running "
+            "(http://127.0.0.1:9066)\n"
+            "  2. GOBBONET_PASSWORD matches "
+            "your GobboNet password\n"
+            "  3. Playwright is installed\n"
+            "  4. gobbonet-state-export.json "
+            "is beside this script\n"
+            f"  5. Character card "
+            f"'{CHARACTER_NAME}' exists in "
+            "the export\n",
+            flush=True,
+        )
+
     app = GobboNetHelper()
-    app.mainloop()
+
+    try:
+        app.mainloop()
+
+    finally:
+        GOBBO_BRIDGE.stop()
+
