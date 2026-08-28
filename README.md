@@ -3,10 +3,10 @@ Makes a little floating guy on the desktop with basic emotes.
 Steps to make this work:
 
 1. Install Gobbonet with all the default settings
-2. Inside Gobbonet, under mods, paste the contents of "inline js mod" into a script. (Read it first, of course. Don't trust me or anything.)
-3. Write your plain-text password into the python script, replacing "YOUR PASSWORD" as the value for GOBBONET_PASSWORD. (Again -- don't trust me! This is obviously not secure!)
-4. Set up a character sheet to output an emotion from the emotion map before every message.
-5. Run the python script and have your browser open to a thread. Clicking the character and typing a message sends it through your browser into the chat.
+2. Write your plain-text password into the python script, replacing "YOUR PASSWORD" as the value for GOBBONET_PASSWORD. (Again -- don't trust me! This is obviously not secure!)
+3. Set up a character sheet to output an emotion from the emotion map before every message.
+4. Run the python script.
+5. Drag the character sprite away from the center of your monitor... then left click it to open the message dialogue.
 
 I know, it's all very lame. I just wanted to see if I could get something working easily. Idk if this was the easiest way, but it works.
 
@@ -22,6 +22,6 @@ You are direct, polite, and concise. You vary your emotions to match the user's 
 Opening Greeting:
 [happy] Hello, user.
 
-
+<img width="283" height="247" alt="image" src="https://github.com/user-attachments/assets/f662b454-985c-4edb-bd38-6d2a5abc7154" />
 
 Good luck!
