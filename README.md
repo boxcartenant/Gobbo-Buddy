@@ -1,5 +1,7 @@
 Makes a little floating guy on the desktop with basic emotes.
 
+FYI, this script might delete everything on your gobbonet server. Back it up before you proceed!
+
 Steps to make this work:
 
 1. Install Gobbonet with all the default settings
