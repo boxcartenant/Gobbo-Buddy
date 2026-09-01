@@ -13,6 +13,6 @@ This is what it looks like when it's talking:
 
 <img width="283" height="247" alt="image" src="https://github.com/user-attachments/assets/f662b454-985c-4edb-bd38-6d2a5abc7154" />
 
-But also now it has a little triangle on the bottom of the text area so it looks more like a word bubble.
+But also now it has a little triangle on the bottom of the text area so it looks more like a word bubble. I'm just too lazy to update the screenshot.
 
 Good luck!
