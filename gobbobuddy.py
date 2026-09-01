@@ -74,11 +74,28 @@ MAX_SUMMARY_CHARS = 180
 
 # GobboNet URLs & Credentials
 GOBBONET_BASE_URL = "http://127.0.0.1:9066"
-GOBBONET_PASSWORD = "MY PASSWORD"
 LLM_DIRECT_BASE = "http://127.0.0.1:11437"
 LLM_DIRECT_TIMEOUT = 45
 GENERATION_TIMEOUT = 600
 PAGE_READY_TIMEOUT = 60
+
+# ============================================================
+# NEED THAT PASSWORD
+# ============================================================
+def get_password():
+    # 1. Create temporary root and hide it instantly
+    temp_root = tk.Tk()
+    temp_root.withdraw()
+
+    # 2. Show prompt (built-in modal window)
+    password = simpledialog.askstring("Gobbonet Auth", "Enter Gobbonet password:", show="*")
+
+    # 3. Clean up the temporary root entirely
+    temp_root.destroy()
+    
+    return password or ""
+
+GOBBONET_PASSWORD = get_password()
 
 # ============================================================
 # LIGHTWEIGHT OS WEBVIEW BRIDGE (replaces playwright)
