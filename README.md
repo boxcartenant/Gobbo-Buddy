@@ -5,9 +5,8 @@ FYI, this script might delete everything on your gobbonet server. Back it up bef
 Steps to make this work:
 
 1. Install Gobbonet with all the default settings
-2. Write your plain-text password into the python script, replacing "YOUR PASSWORD" as the value for GOBBONET_PASSWORD. (Again -- don't trust me! This is obviously not secure!)
-3. Run the gobbo-buddy script with your sprite sheet in the same folder.
-4. Drag the character sprite away from the center of your monitor... then left click it to open the message dialogue, right click it to get some other options, aor just leave it alone and it'll sometimes chime-in.
+2. Run the gobbo-buddy script with your sprite sheet in the same folder.
+3. Drag the character sprite away from the center of your monitor... then left click it to open the message dialogue, right click it to get some other options, aor just leave it alone and it'll sometimes chime-in.
 
 I know, it's all very lame. I just wanted to see if I could get something working easily. Idk if this was the easiest way, but it works.
 
