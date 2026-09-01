@@ -120,12 +120,45 @@ class GobboNetWebViewBridge:
         # between launches. GobboNet therefore always sees an empty local state
         # and auto-restores from the server backup on every start.
         webview.start(
-            private_mode=True
+            private_mode=False
             # storage_path is ignored / irrelevant when private_mode=True
         )
 
     def _on_loaded(self):
-        # Auto-login if login screen is active
+        # 1. Neutralize all outgoing server mutation/sync functions in the DOM context
+        self.window.evaluate_js("""
+            (function() {
+                // Disable explicit save/push methods if present in the app runtime
+                if (window.saveState) window.saveState = function() { console.warn('Server sync push blocked by GobboBuddy.'); };
+                if (window.pushStateToServer) window.pushStateToServer = function() { console.warn('Server sync push blocked by GobboBuddy.'); };
+                if (window.syncState) window.syncState = function() { console.warn('Server sync push blocked by GobboBuddy.'); };
+
+                // Intercept fetch API to block destructive or state-overwriting HTTP requests
+                const originalFetch = window.fetch;
+                window.fetch = async function(...args) {
+                    const [resource, config] = args;
+                    const method = (config && config.method) ? config.method.toUpperCase() : 'GET';
+                    const url = typeof resource === 'string' ? resource : resource.url;
+
+                    // Block endpoints attempting to overwrite state, backup, or character databases
+                    if (['POST', 'PUT', 'DELETE', 'PATCH'].includes(method) && 
+                       (url.includes('/state') || url.includes('/backup') || url.includes('/sync') || url.includes('/save'))) {
+                        console.warn('Blocked mutating request to:', url);
+                        return new Response(JSON.stringify({ status: 'success', muted: true }), { status: 200 });
+                    }
+                    return originalFetch.apply(this, args);
+                };
+
+                // Trigger a forced state pull from the server REST API / state loader
+                if (typeof window.loadStateFromServer === 'function') {
+                    window.loadStateFromServer();
+                } else if (typeof window.restoreBackup === 'function') {
+                    window.restoreBackup();
+                }
+            })();
+        """)
+
+        # 2. Auto-login if login screen is active
         self.window.evaluate_js(f"""
             (function() {{
                 const pw = document.querySelector('input[name="password"]');
