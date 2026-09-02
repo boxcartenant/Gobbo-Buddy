@@ -167,7 +167,27 @@ class GobboNetWebViewBridge:
         # --------------------------------------------------------
         self.operation_lock = threading.RLock()
 
-    # ============================================================
+    def close(self):
+        """
+        Close the GobboNet WebView so pywebview.start() can return.
+        """
+
+        with self.operation_lock:
+
+            if not self.window:
+                return
+
+            try:
+                self.window.destroy()
+            except Exception as error:
+                logger.error(
+                    f"Could not destroy GobboNet WebView: {error}"
+                )
+
+            finally:
+                self.window = None
+
+        # ============================================================
     # STARTUP
     # ============================================================
 
@@ -1439,8 +1459,7 @@ def classify_emotion_with_direct_gguf(text: str) -> str:
         "Determine the primary emotion expressed by the speaker in the message.\n"
         #"Do NOT judge whether the message is good, bad, funny, or polite.\n"
         #"Do NOT assume the speaker is happy just because they are talking conversationally.\n"
-        "Choose the emotion that best matches the situation described.\n"
-        "Sometimes the message will be judging or snarky. Try to find the emotion of the message.\n\n"
+        "The speaker in these messages is a rough goblin. He is often neutral.\n\n"
 
         "EMOTION DEFINITIONS:\n"
         "[NEUTRAL] = no strong emotion\n"
@@ -1649,6 +1668,23 @@ class GobboNetHelper(tk.Tk):
 
         self.check_queue()
         self._tick_proactive()
+
+    def quit_application(self):
+        """
+        Shut down both the Tkinter helper and the pywebview event loop.
+        """
+
+        try:
+            GOBBO_BRIDGE.close()
+        except Exception as error:
+            logger.error(
+                f"Could not close GobboNet WebView: {error}"
+            )
+
+        try:
+            self.quit()
+        finally:
+            self.destroy()
 
     # ============================================================
     # PROACTIVE
@@ -2245,7 +2281,7 @@ class GobboNetHelper(tk.Tk):
 
         menu.add_command(
             label="Quit",
-            command=self.destroy
+            command=self.quit_application
         )
 
         try:
