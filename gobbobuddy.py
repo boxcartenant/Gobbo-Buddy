@@ -50,6 +50,8 @@ logger = logging.getLogger("GobboBuddy")
 SPRITE_SHEET_PATH = "gobbo sprites 2.png"
 MAX_BUBBLE_LINES = 30
 ROWS, COLS = 3, 4
+SPRITE_SIZE_X = 120
+SPRITE_SIZE_Y = 120
 
 EMOTION_MAP = {
     "neutral": (0, 0),
@@ -1795,7 +1797,7 @@ class GobboNetHelper(tk.Tk):
             self.sprites[emotion] = (
                 ImageTk.PhotoImage(
                     cropped.resize(
-                        (130, 170),
+                        (SPRITE_SIZE_X, SPRITE_SIZE_Y),
                         Image.Resampling.LANCZOS
                     )
                 )
