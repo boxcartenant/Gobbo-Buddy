@@ -5,7 +5,7 @@ There's a bug in this code where, if Gobbonet has 0 threads, then using the gobb
 
 USE AT YOUR OWN RISK!!
 
-
+Most of this code, including the sprite sheet, were made almost entirely by AI.
 
 Steps to make this work:
 
