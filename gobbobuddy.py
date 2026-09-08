@@ -13,6 +13,7 @@ from pathlib import Path
 from PIL import Image, ImageTk
 import webview
 import tempfile
+from screeninfo import get_monitors
 
 
 # Optional Accessibility Stack
@@ -187,7 +188,7 @@ class GobboNetWebViewBridge:
             finally:
                 self.window = None
 
-        # ============================================================
+    # ============================================================
     # STARTUP
     # ============================================================
 
@@ -217,12 +218,55 @@ class GobboNetWebViewBridge:
         )
 
         self.window.events.loaded += self._on_loaded
+        
 
         webview.start(
             private_mode=True#,
             #storage_path=str(GOBBONET_WEBVIEW_PROFILE)
         )
 
+    def force_server_restore(self):
+        """
+        Force GobboNet to pull the server /state backup into the
+        current (private-mode) WebView and reload.
+        This is the same path the normal browser takes when you click Yes.
+        """
+        with self.operation_lock:
+            # Wait a moment for GobboNet's own boot + checkServerStateOnBoot to settle
+            time.sleep(1.5)
+
+            result = self.eval_js("""
+                (async () => {
+                    try {
+                        // Prefer the official API if it exists
+                        if (typeof restoreFromServer === 'function') {
+                            const ok = await restoreFromServer({ silent: true });
+                            return { ok: !!ok, method: 'restoreFromServer' };
+                        }
+
+                        // Fallback: hit /state ourselves and let GobboNet's
+                        // storage layer pick it up on the next load
+                        const resp = await fetch('/state', { cache: 'no-store' });
+                        if (!resp.ok) return { ok: false, reason: 'HTTP ' + resp.status };
+
+                        const text = await resp.text();
+                        // Just having the data is enough; a reload will make
+                        // loadState() + the sync logic pick it up.
+                        return { ok: true, method: 'fetch', size: text.length };
+                    } catch (e) {
+                        return { ok: false, reason: String(e) };
+                    }
+                })()
+            """)
+
+            logger.info(f"Force restore result: {result}")
+
+            # restoreFromServer does a location.reload() on success.
+            # Give the reload a chance to happen, then re-wait for state.
+            if result and result.get("ok"):
+                time.sleep(2.0)          # allow the reload to start
+                # The next loaded event / wait_for_gobbonet_state will pick it up
+    
     def _on_loaded(self):
         """
         Handle page loads.
@@ -241,9 +285,25 @@ class GobboNetWebViewBridge:
 
             self._startup_started = True
 
+        # --------------------------------------------------------
+        # AUTO-ACCEPT any restore / sync confirm() dialogs.
+        # Must run before GobboNet's checkServerStateOnBoot().
+        # --------------------------------------------------------
+        try:
+            self.eval_js("""
+                window.confirm = function(msg) {
+                    console.log('[GobboBuddy] Auto-accepting confirm:', msg);
+                    return true;
+                };
+            """)
+            logger.info("Installed confirm() auto-accept override.")
+        except Exception as e:
+            logger.warning(f"Could not install confirm override: {e}")
+
+
         try:
             self._attempt_login()
-
+            self.force_server_restore()
             self._wait_for_ui()
 
             self.ui_ready_event.set()
@@ -913,7 +973,7 @@ class GobboNetWebViewBridge:
             if not result:
 
                 raise RuntimeError(
-                    "GobboNet could not create "
+                    "GobboNet could not create... "
                     "a new thread."
                 )
 
@@ -1299,68 +1359,7 @@ class GobboNetWebViewBridge:
                 "GobboNet generation timed out."
             )
 
-    # ============================================================
-    # THREAD CREATION
-    # ============================================================
-
-    def create_new_thread(self):
-        """
-        Create a new thread only after state has been verified.
-        """
-
-        with self.operation_lock:
-
-            self.assert_mutations_allowed()
-
-            result = self.eval_js("""
-                (() => {
-
-                    if (
-                        typeof createNewThread ===
-                        "function"
-                    ) {
-                        return createNewThread();
-                    }
-
-                    if (
-                        typeof createThread ===
-                        "function"
-                    ) {
-                        return createThread();
-                    }
-
-                    if (
-                        window.state &&
-                        typeof window.createThread ===
-                        "function"
-                    ) {
-                        return window.createThread();
-                    }
-
-                    // DOM fallback is retained, but only after
-                    // all safety gates above have passed.
-                    const newBtn =
-                        document.querySelector(
-                            '#new-thread-btn, ' +
-                            '.new-chat-btn, ' +
-                            'button[title*="New"]'
-                        );
-
-                    if (newBtn) {
-                        newBtn.click();
-                        return true;
-                    }
-
-                    return false;
-                })()
-            """)
-
-            if not result:
-                raise RuntimeError(
-                    "GobboNet could not create a new thread."
-                )
-
-            return result
+    
 
     # ============================================================
     # GENERATION CONTROL
@@ -1436,11 +1435,11 @@ def get_active_window_info():
         return None
 
 def summarize_with_direct_gguf(app_name: str, title: str, content: str) -> str:
-    prompt = f"Summarize desktop window in ONE short sentence.\nApp: {app_name}\nTitle: {title}\nContent: {content}"
+    prompt = f"The following is content data. Output a ONE SENTENCE summary of the data:\n{content}"
     payload = {
         "model": "local",
         "messages": [{"role": "user", "content": prompt}],
-        "max_tokens": 80,
+        "max_tokens": 150,
         "temperature": 0.3
     }
     try:
@@ -1455,30 +1454,22 @@ def classify_emotion_with_direct_gguf(text: str) -> str:
     Returns one of the keys in EMOTION_MAP (lowercase, no brackets).
     """
     prompt = (
-        "You are an emotion classifier.\n"
-        "Determine the primary emotion expressed by the speaker in the message.\n"
+        "You are an emotion classifier. You output emotion tags to improve immersion for a video game.\n\n"
         #"Do NOT judge whether the message is good, bad, funny, or polite.\n"
         #"Do NOT assume the speaker is happy just because they are talking conversationally.\n"
-        "The speaker in these messages is a rough goblin. He is often neutral.\n\n"
+        "You support the following tags: \n\n[NEUTRAL] | [HAPPY] | [JOKING] | [CURIOUS] | [SNARKY] | [EXCITED] | [SKEPTICAL] | [JUDGING] | [SHOCKED] | [SAD] | [ANXIOUS] | [EMBARRASSED] | [FLATTERED]"
+        "Examples:\n"
+        "NPC: '''You look really happy today!''' > [NEUTRAL]\n"
+        "NPC: '''I am absolutely terrified of spiders.''' > [ANXIOUS]\n"
+        "NPC: '''Oh no, Box is sad.''' > [NEUTRAL]\n"
+        "NPC: '''Wonderful. Another broken machine.''' > [SNARKY]\n"
+        "NPC: '''Wait, you actually did it?!''' > [SHOCKED]\n"
+        "NPC: '''He thinks he is clever.''' > [JUDGING]\n"
+        "NPC: '''Haha, that was ridiculous.''' > [JOKING]\n"
+        "NPC: '''I am so happy to see you!''' > [HAPPY]\n\n"
 
-        "EMOTION DEFINITIONS:\n"
-        "[NEUTRAL] = no strong emotion\n"
-        "[HAPPY] = pleasure, joy, satisfaction, contentment\n"
-        "[JOKING] = intentionally humorous or playful\n"
-        "[CURIOUS] = wanting to know or understand something\n"
-        "[SNARKY] = mocking, sarcastic, or derisive\n"
-        "[EXCITED] = strong enthusiasm or eager anticipation\n"
-        "[SKEPTICAL] = doubt, disbelief, or suspicion\n"
-        "[JUDGING] = disapproval, criticism, or condemnation\n"
-        "[SHOCKED] = sudden surprise or astonishment\n"
-        "[SAD] = sorrow, grief, disappointment, or misery\n"
-        "[ANXIOUS] = fear, worry, dread, or concern about danger\n"
-        "[EMBARRASSED] = shame, awkwardness, or social discomfort\n"
-        "[FLATTERED] = pleased by praise or admiration\n\n"
-
-        "Reply with ONLY one emotion tag.\n\n"
-        f"Message:\n{text[:1200]}\n\n"
-        "Emotion:"
+        "If the NPC's emotional state is unclear, output [NEUTRAL].\n"
+        f"\n\nAn NPC is saying the following message. You must assign the NPC a facial expression by outputting an emotion tag. This is the message:\nNPC: '''{text[:1200]}'''\n\n"
     )
     #print(text[:1200])
 
@@ -1499,6 +1490,7 @@ def classify_emotion_with_direct_gguf(text: str) -> str:
             timeout=LLM_DIRECT_TIMEOUT
         )
         raw = r.json()["choices"][0]["message"]["content"].strip()
+        print(f"Classifier: {raw}")
 
         for tag in EMOTION_MAP:
             if f"[{tag.upper()}]" in raw.upper():
@@ -1508,9 +1500,51 @@ def classify_emotion_with_direct_gguf(text: str) -> str:
         logger.warning(f"Emotion classification failed: {e}")
         return DEFAULT_EMOTION
 
+def proactive_prompt_rotator():
+    garden = [
+        "What do the goblin warriors do when they encounter this kind of thing?",
+        "What would a goblin warrior think about this?",
+        "Does this remind you of the wars?",
+        "Does anything here look suspicious?",
+        "How would you conquer this task?",
+        "What does this remind you of?",
+        "What weapon would you choose here?",
+        "There is a mighty dragon here.",
+        "It is office work! Oh my!",
+        "Is there anything here worth looting?",
+        "What kind of dark magic forced this onto the screen?",
+        "This could be a bandit hideout. Prepare for battle.",
+        "How do you think this would taste?",
+        "Can we throw a rock at this?",
+        "Does this look like a good spot to stop and take a nap?",
+        "What terrible curse brought this awful sight before us?",
+        "Call the horde to smash whatever is happening here.",
+        "Is there any beer nearby to help us with this?",
+        "How does this situation smell to your sharp goblin nose?",
+        "How can we sabotage it?",
+        "Could this be a map to a hidden dungeon?",
+        "Can we trade this to an ogre for a chicken leg?",
+        "What would the warlocks say about this?",
+        "It is from the ancient spellbooks of the high elves.",
+        "This reminds me of the goblin wars.",
+        "How did the goblin wizards handle these in the past?",
+        "Is it a trap?",
+        "What kind of potion do we need for this?",
+        "Is it an omen?",
+        "What kind of potion could we make with this?",
+        "How did the clan chief instruct us to handle this?",
+        "How did you handle this last time you were in the woods?",
+        "RAAAAAAARRRRGH!!!! Arm yourself! It's about to attack!",
+        "Should we handle this the sneaky way, or attack it head on?"
+        ]
+    return random.choice(garden)
+        
+
 def build_simple_user_message(app_name: str, title: str, summary: str) -> str:
     what = title if title and title != "(no title)" else app_name
-    return f"I'm in {app_name} looking at '{what}'. {summary}. What do you think about that? Give me a short comment on it."
+    what = what.replace("-","")
+    prompt = proactive_prompt_rotator()
+    return f"Fumo, I'm using '{app_name}', looking at '{what}'. The page shows things like ['{summary}']. \n\n{prompt}"
 
 # ============================================================
 # TKINTER UI
@@ -1699,6 +1733,7 @@ class GobboNetHelper(tk.Tk):
         self._next_opportunity_at = (
             time.time() + delay
         )
+        print(f"Proactive: next opportunity in {delay}s")
         #print(f"Next proactive in {delay} seconds")
 
     def _note_message_exchanged(self):
@@ -1947,19 +1982,29 @@ class GobboNetHelper(tk.Tk):
         )
 
     def clamp_to_screen_bounds(self):
-
         self.update_idletasks()
-
-        sw = self.winfo_screenwidth()
-        sh = self.winfo_screenheight()
 
         ww = self.winfo_width()
         wh = self.winfo_height()
+        wx = self.winfo_x()
+        wy = self.winfo_y()
 
-        self.geometry(
-            f"+{max(0, min(self.winfo_x(), sw - ww))}"
-            f"+{max(0, min(self.winfo_y(), sh - wh))}"
-        )
+        monitors = get_monitors()
+
+        # Find the monitor the window is currently most aligned with
+        # Default to the primary monitor if none match
+        target_monitor = monitors[0]
+        for monitor in monitors:
+            if (monitor.x <= wx < monitor.x + monitor.width) and \
+               (monitor.y <= wy < monitor.y + monitor.height):
+                target_monitor = monitor
+                break
+
+        # Clamp coordinates to the target monitor's specific bounds
+        clamped_x = max(target_monitor.x, min(wx, target_monitor.x + target_monitor.width - ww))
+        clamped_y = max(target_monitor.y, min(wy, target_monitor.y + target_monitor.height - wh))
+
+        self.geometry(f"+{clamped_x}+{clamped_y}")
 
     def center_on_screen(self):
 
@@ -2196,7 +2241,7 @@ class GobboNetHelper(tk.Tk):
             tearoff=False
         )
 
-        persona_menu = tk.Menu(
+        character_menu = tk.Menu(
             menu,
             tearoff=False
         )
@@ -2211,7 +2256,7 @@ class GobboNetHelper(tk.Tk):
 
             if not GOBBO_BRIDGE.state_ready_event.is_set():
 
-                persona_menu.add_command(
+                character_menu.add_command(
                     label="GobboNet still loading...",
                     state="disabled"
                 )
@@ -2232,7 +2277,7 @@ class GobboNetHelper(tk.Tk):
                             "Unnamed"
                         )
 
-                        persona_menu.add_command(
+                        character_menu.add_command(
                             label=card_name,
                             command=lambda cid=card_id:
                                 self.select_character(cid)
@@ -2244,7 +2289,7 @@ class GobboNetHelper(tk.Tk):
                     # an initialized zero-card state.
                     #
                     # We still do NOT perform any mutation.
-                    persona_menu.add_command(
+                    character_menu.add_command(
                         label="No characters found",
                         state="disabled"
                     )
@@ -2255,14 +2300,14 @@ class GobboNetHelper(tk.Tk):
                 f"Could not read GobboNet characters: {error}"
             )
 
-            persona_menu.add_command(
+            character_menu.add_command(
                 label="Characters unavailable",
                 state="disabled"
             )
 
         menu.add_cascade(
-            label="Persona",
-            menu=persona_menu
+            label="Character",
+            menu=character_menu
         )
 
         menu.add_separator()
