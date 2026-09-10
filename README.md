@@ -17,6 +17,6 @@ This is what it looks like when it's talking:
 
 <img width="247" height="219" alt="image" src="https://github.com/user-attachments/assets/5b6ee7f1-816a-4ef9-b604-515a27c7c142" />
 
-Still working on my character sheets. This polite roaring is from a 125M gguf.
+Still working on my character sheets. This polite roaring is from a 135M gguf.
 
 Good luck!
