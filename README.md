@@ -5,7 +5,7 @@ Most of this code, including the sprite sheet, were made almost entirely by AI. 
 Steps to make this work:
 
 1. Install Gobbonet v1.7.6 or better, with all the default settings
-2. Run the gobbo-buddy script with your sprite sheet in the same folder.
+2. Run the program with your sprite sheet in the same folder.
 3. Drag the character sprite away from the center of your monitor... then left click it to open the message dialogue, right click it to get some other options, aor just leave it alone and it'll sometimes say stuff about what you're doing.
 
 The first time you run the program, it will create a config.json file. I highly recommend that you edit that, to make it fit your use-case better.
