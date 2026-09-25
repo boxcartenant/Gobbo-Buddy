@@ -12,9 +12,25 @@ from pathlib import Path
 from PIL import Image, ImageTk
 import webview
 from screeninfo import get_monitors
+import sys
 
 # Optional Accessibility Stack
 try:
+    try:
+        import comtypes.client as _comtypes_client
+        SCRIPT_DIR = Path(__file__).resolve().parent
+        COMTYPES_CACHE_DIR = SCRIPT_DIR / "comtypes_cache"
+        COMTYPES_CACHE_DIR.mkdir(exist_ok=True)
+
+        _comtypes_client.gen_dir = str(COMTYPES_CACHE_DIR)
+    except OSError as _cache_err:
+        # Worst case, fall back to in-memory generation (slower, but works
+        # without ever touching disk).
+        logging.getLogger("GobboBuddy").warning(
+            f"Could not create comtypes cache dir, generating in-memory: {_cache_err}"
+        )
+        _comtypes_client.gen_dir = None
+        
     import uiautomation as auto
     import win32gui
     import win32process
@@ -32,7 +48,10 @@ logger = logging.getLogger("GobboBuddy")
 # ============================================================
 # PATHS & DEFAULTS  (shippable – all character flavour lives here)
 # ============================================================
-SCRIPT_DIR = Path(__file__).resolve().parent
+if getattr(sys, "frozen", False):
+    SCRIPT_DIR = Path(sys.executable).resolve().parent
+else:
+    SCRIPT_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = SCRIPT_DIR / "gobbo_buddy_config.json"
 
 DEFAULT_SPRITE_SHEET = "gobbo sprites 2.png"
@@ -139,6 +158,9 @@ def load_config():
             cfg.setdefault("emotions", DEFAULT_EMOTIONS.copy())
             cfg.setdefault("proactive_prompts", DEFAULT_PROACTIVE_PROMPTS.copy())
             cfg.setdefault("proactive_template", DEFAULT_PROACTIVE_TEMPLATE)
+            cfg.setdefault("proactive_check_period_min", RANDOM_WINDOW_MIN_SECONDS)
+            cfg.setdefault("proactive_check_period_max", RANDOM_WINDOW_MAX_SECONDS)
+            cfg.setdefault("proactive_probability", RANDOM_WINDOW_PROBABILITY)
             cfg.setdefault("proactive_enabled", DEFAULT_PROACTIVE_ENABLED)
             cfg.setdefault("max_raw_content_chars", DEFAULT_MAX_RAW_CONTENT_CHARS)
             return cfg
@@ -163,6 +185,10 @@ def load_config():
         "proactive_prompts": DEFAULT_PROACTIVE_PROMPTS.copy(),
         "PROACT_TMPLT_COMMENT": "This is the format for accessibility data sent to the model for summary.",
         "proactive_template": DEFAULT_PROACTIVE_TEMPLATE,
+        "PROACT_RATE_COMMENT": "Proactive screen reading schedules opportunities randomly between min/max time. At each opportunity, it rolls probability, and if it fails then it doesn't do anything and just reschedules.",
+        "proactive_check_period_min": RANDOM_WINDOW_MIN_SECONDS,
+        "proactive_check_period_max": RANDOM_WINDOW_MAX_SECONDS,
+        "proactive_probability": RANDOM_WINDOW_PROBABILITY,
         "PROACT_ENABLE_COMMENT": "If you don't want this program reading your screen, just set proactive_enabled to false.",
         "proactive_enabled": DEFAULT_PROACTIVE_ENABLED,
         "RAW_CONTENT_COMMENT": "I am testing this with a very limited model, so I truncate the {what} part of the accessibility date before sending it. Set this to 0 to disable truncation.",
@@ -182,7 +208,7 @@ def save_config(cfg):
 CONFIG = load_config()
 
 # Live values (updated when user changes them via the menu)
-SPRITE_SHEET_PATH = CONFIG["sprite_sheet"]
+SPRITE_SHEET_PATH = SCRIPT_DIR / CONFIG["sprite_sheet"]
 SPRITE_WIDTH = CONFIG["sprite_width"]
 SPRITE_HEIGHT = CONFIG["sprite_height"]
 ROWS = CONFIG["rows"]
@@ -835,7 +861,7 @@ def summarize_with_direct_gguf(app_name: str, title: str, content: str) -> str:
 def classify_emotion_with_direct_gguf(text: str) -> str:
     tag_list = build_emotion_tag_list(EMOTION_MAP)
     prompt = (
-        f"It is fun for RPG characters to show dramatic feelings with their body language when they speak, like these:\n"
+        f"It is fun for RPG characters to show dramatic feelings when they speak, like these:\n"
         "{tag_list}\n"
         "Which of the listed emotions would be interesting to see in an RPG character saying this:\n\n\"\"\"\n{text}\n\"\"\"\n\n"        
         )
@@ -1038,7 +1064,7 @@ class GobboNetHelper(tk.Tk):
     def _schedule_next_opportunity(self):
         delay = random.uniform(RANDOM_WINDOW_MIN_SECONDS, RANDOM_WINDOW_MAX_SECONDS)
         self._next_opportunity_at = time.time() + delay
-        print(f"Proactive: next opportunity in {delay:.1f}s")
+        #print(f"Proactive: next opportunity in {delay:.1f}s")
 
     def _note_message_exchanged(self):
         self._last_message_time = time.time()
@@ -1072,6 +1098,7 @@ class GobboNetHelper(tk.Tk):
                 and not self._proactive_busy
             ):
                 if random.random() < RANDOM_WINDOW_PROBABILITY:
+                    print("Proactive: roll success. Starting worker.")
                     threading.Thread(target=self._proactive_worker, daemon=True).start()
                 self._schedule_next_opportunity()
         except Exception as error:
