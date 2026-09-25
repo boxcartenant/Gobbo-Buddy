@@ -4,15 +4,13 @@ import queue
 import threading
 import logging
 import tkinter as tk
-from tkinter import simpledialog
+from tkinter import simpledialog, filedialog
 import time
-import traceback
 import random
 import requests
 from pathlib import Path
 from PIL import Image, ImageTk
 import webview
-import tempfile
 from screeninfo import get_monitors
 
 # Optional Accessibility Stack
@@ -32,46 +30,175 @@ logging.basicConfig(level=logging.INFO, format="[%(levelname)s] %(message)s")
 logger = logging.getLogger("GobboBuddy")
 
 # ============================================================
-# CONFIGURATION
+# PATHS & DEFAULTS  (shippable – all character flavour lives here)
 # ============================================================
-SPRITE_SHEET_PATH = "gobbo sprites 2.png"
-MAX_BUBBLE_LINES = 30
-ROWS, COLS = 3, 4
-SPRITE_SIZE_X = 120
-SPRITE_SIZE_Y = 120
+SCRIPT_DIR = Path(__file__).resolve().parent
+CONFIG_PATH = SCRIPT_DIR / "gobbo_buddy_config.json"
 
-EMOTION_MAP = {
-    "neutral": (0, 0),
-    "happy": (0, 1),
-    "joking": (0, 1),
-    "curious": (0, 2),
-    "snarky": (0, 3),
-    "excited": (1, 0),
-    "skeptical": (1, 1),
-    "judging": (1, 2),
-    "shocked": (1, 3),
-    "sad": (2, 0),
-    "anxious": (2, 1),
-    "embarrassed": (2, 2),
-    "flattered": (2, 3),
+DEFAULT_SPRITE_SHEET = "gobbo sprites 2.png"
+DEFAULT_SPRITE_WIDTH = 120
+DEFAULT_SPRITE_HEIGHT = 120
+DEFAULT_ROWS = 3
+DEFAULT_COLS = 4
+
+DEFAULT_EMOTIONS = {
+    "neutral":     [0, 0],
+    "happy":       [0, 1],
+    "joking":      [0, 1],
+    "curious":     [0, 2],
+    "snarky":      [0, 3],
+    "excited":     [1, 0],
+    "skeptical":   [1, 1],
+    "judging":     [1, 2],
+    "shocked":     [1, 3],
+    "sad":         [2, 0],
+    "anxious":     [2, 1],
+    "embarrassed": [2, 2],
+    "flattered":   [2, 3],
 }
 
 DEFAULT_EMOTION = "neutral"
 TRANSPARENT_COLOR = "#15181D"
+MAX_BUBBLE_LINES = 30
 
-# Proactive Settings
+# Character-specific defaults (Fumo / goblin theme)
+BUDDY_NAME = ""
+
+DEFAULT_PROACTIVE_PROMPTS = [
+    "What do the goblin warriors do when they encounter this kind of thing?",
+    "What would a goblin warrior think about this?",
+    "Does this remind you of the wars?",
+    "Does anything here look suspicious?",
+    "How would you conquer this task?",
+    "What does this remind you of?",
+    "What weapon would you choose here?",
+    "There is a mighty dragon here.",
+    "It is office work! Oh my!",
+    "Is there anything here worth looting?",
+    "What kind of dark magic forced this onto the screen?",
+    "This could be a bandit hideout. Prepare for battle.",
+    "How do you think this would taste?",
+    "Can we throw a rock at this?",
+    "Does this look like a good spot to stop and take a nap?",
+    "What terrible curse brought this awful sight before us?",
+    "Call the horde to smash whatever is happening here.",
+    "Is there any beer nearby to help us with this?",
+    "How does this situation smell to your sharp goblin nose?",
+    "How can we sabotage it?",
+    "Could this be a map to a hidden dungeon?",
+    "Can we trade this to an ogre for a chicken leg?",
+    "What would the warlocks say about this?",
+    "It is from the ancient spellbooks of the high elves.",
+    "This reminds me of the goblin wars.",
+    "How did the goblin wizards handle these in the past?",
+    "Is it a trap?",
+    "What kind of potion do we need for this?",
+    "Is it an omen?",
+    "What kind of potion could we make with this?",
+    "How did the clan chief instruct us to handle this?",
+    "How did you handle this last time you were in the woods?",
+    "RAAAAAAARRRRGH!!!! Arm yourself! It's about to attack!",
+    "Should we handle this the sneaky way, or attack it head on?"
+]
+
+# {app_name}, {what}, {summary}, {prompt} are substituted
+DEFAULT_PROACTIVE_TEMPLATE = (
+    "I'm using '{app_name}', looking at '{what}'. "
+    "The page shows things like ['{summary}']. \n\n{prompt}"
+)
+
+# Proactive timing (still global – rarely needs per-character change)
 RANDOM_WINDOW_MIN_SECONDS = 45
 RANDOM_WINDOW_MAX_SECONDS = 180
 RANDOM_WINDOW_PROBABILITY = 0.35
-MAX_RAW_CONTENT_CHARS = 1800
+DEFAULT_MAX_RAW_CONTENT_CHARS = 1800
+DEFAULT_PROACTIVE_ENABLED = True
 MAX_SUMMARY_CHARS = 180
 
-# GobboNet URLs & Credentials
+# GobboNet connection
 GOBBONET_BASE_URL = "http://127.0.0.1:9066"
 LLM_DIRECT_BASE = "http://127.0.0.1:11437"
 LLM_DIRECT_TIMEOUT = 45
 GENERATION_TIMEOUT = 600
 PAGE_READY_TIMEOUT = 60
+
+# ============================================================
+# CONFIG LOAD / SAVE
+# ============================================================
+def load_config():
+    if CONFIG_PATH.exists():
+        try:
+            with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+                cfg = json.load(f)
+            # Ensure every key exists (forward-compatible)
+            cfg.setdefault("sprite_sheet", DEFAULT_SPRITE_SHEET)
+            cfg.setdefault("sprite_width", DEFAULT_SPRITE_WIDTH)
+            cfg.setdefault("sprite_height", DEFAULT_SPRITE_HEIGHT)
+            cfg.setdefault("rows", DEFAULT_ROWS)
+            cfg.setdefault("cols", DEFAULT_COLS)
+            cfg.setdefault("emotions", DEFAULT_EMOTIONS.copy())
+            cfg.setdefault("proactive_prompts", DEFAULT_PROACTIVE_PROMPTS.copy())
+            cfg.setdefault("proactive_template", DEFAULT_PROACTIVE_TEMPLATE)
+            cfg.setdefault("proactive_enabled", DEFAULT_PROACTIVE_ENABLED)
+            cfg.setdefault("max_raw_content_chars", DEFAULT_MAX_RAW_CONTENT_CHARS)
+            return cfg
+        except Exception as e:
+            logger.warning(f"Could not read config, using defaults: {e}")
+    else:
+        logger.warning(f"NO CONFIG FOUND. One will be created. You should definitely change the contents.")
+
+    # First run – write complete defaults
+    cfg = {
+        "SPRITE_COMMENT": "Change sprite_sheet to the sheet you want to load at start."
+        "sprite_sheet": DEFAULT_SPRITE_SHEET,
+        "SPRITE_HW_COMMENT": "Sprites are captured based on row/col count, and then scaled to these pixel dimensions:"
+        "sprite_width": DEFAULT_SPRITE_WIDTH,
+        "sprite_height": DEFAULT_SPRITE_HEIGHT,
+        "ROW_COL_COMMENT": "This is how many rows and columns your sprite sheet has. They should be evenly spaced."
+        "rows": DEFAULT_ROWS,
+        "cols": DEFAULT_COLS,
+        "EMOTION_COMMENT": "Here you can register emotion words by sprite sheet row/column. It's ok to have many words for the same coordinate." 
+        "emotions": DEFAULT_EMOTIONS.copy(),
+        "PROACT_PROMPT_COMMENT": "These prompts are passed to the model with screen/accessibility data, so the model can say something interesting about what you're doing. A line is chosen at random each time. Add/remove/change them at will."
+        "proactive_prompts": DEFAULT_PROACTIVE_PROMPTS.copy(),
+        "PROACT_TMPLT_COMMENT": "This is the format for accessibility data sent to the model for summary."
+        "proactive_template": DEFAULT_PROACTIVE_TEMPLATE,
+        "PROACT_ENABLE_COMMENT": "If you don't want this program reading your screen, just set proactive_enabled to false."
+        "proactive_enabled": DEFAULT_PROACTIVE_ENABLED,
+        "RAW_CONTENT_COMMENT": "I am testing this with a very limited model, so I truncate the {what} part of the accessibility date before sending it. Set this to 0 to disable truncation."
+        "max_raw_content_chars": DEFAULT_MAX_RAW_CONTENT_CHARS,
+    }
+    save_config(cfg)
+    logger.info(f"Created default config at {CONFIG_PATH}")
+    return cfg
+
+def save_config(cfg):
+    try:
+        with open(CONFIG_PATH, "w", encoding="utf-8") as f:
+            json.dump(cfg, f, indent=2, ensure_ascii=False)
+    except Exception as e:
+        logger.error(f"Could not save config: {e}")
+
+CONFIG = load_config()
+
+# Live values (updated when user changes them via the menu)
+SPRITE_SHEET_PATH = CONFIG["sprite_sheet"]
+SPRITE_WIDTH = CONFIG["sprite_width"]
+SPRITE_HEIGHT = CONFIG["sprite_height"]
+ROWS = CONFIG["rows"]
+COLS = CONFIG["cols"]
+EMOTION_MAP = CONFIG["emotions"]
+PROACTIVE_PROMPTS = CONFIG["proactive_prompts"]
+PROACTIVE_TEMPLATE = CONFIG["proactive_template"]
+PROACTIVE_ENABLED = CONFIG.get("proactive_enabled", DEFAULT_PROACTIVE_ENABLED)
+MAX_RAW_CONTENT_CHARS = CONFIG.get("max_raw_content_chars", DEFAULT_MAX_RAW_CONTENT_CHARS)
+
+def build_emotion_tag_list(emotions: dict) -> str:
+    """String injected into the classifier prompt."""
+    parts = []
+    for tag, (r, c) in emotions.items():
+        parts.append(f"[{tag.upper()}] (grid {r},{c})")
+    return " | ".join(parts)
 
 # ============================================================
 # PASSWORD
@@ -89,19 +216,8 @@ GOBBONET_PASSWORD = get_password()
 # LIGHTWEIGHT OS WEBVIEW BRIDGE
 # ============================================================
 class GobboNetWebViewBridge:
-    """
-    Server-safe interface to the GobboNet Web UI.
-
-    With GobboNet 1.7.6+ the boot/restore path correctly handles
-    server backups that contain characters/personas even when
-    there are zero threads. We therefore treat the server as
-    authoritative and keep the WebView in private_mode so it
-    starts empty every launch.
-    """
-
     def __init__(self):
         self.window = None
-
         self.ui_ready_event = threading.Event()
         self.state_ready_event = threading.Event()
         self.ready_event = self.state_ready_event
@@ -110,7 +226,6 @@ class GobboNetWebViewBridge:
         self._startup_started = False
         self._startup_complete = False
 
-        # Mutation safety
         self.state_confirmed = False
         self.mutations_allowed = False
         self.safety_lock = False
@@ -118,8 +233,10 @@ class GobboNetWebViewBridge:
 
         self.last_known_character_count = None
         self.last_known_thread_count = None
-
         self.operation_lock = threading.RLock()
+
+        self.active_character_name = None
+        self.active_character_id = None
 
     def close(self):
         with self.operation_lock:
@@ -132,9 +249,6 @@ class GobboNetWebViewBridge:
             finally:
                 self.window = None
 
-    # ============================================================
-    # STARTUP
-    # ============================================================
     def start_window(self):
         self.window = webview.create_window(
             "GobboNet Engine",
@@ -144,12 +258,9 @@ class GobboNetWebViewBridge:
             height=768
         )
         self.window.events.loaded += self._on_loaded
-        # private_mode=True → empty profile every launch.
-        # GobboNet 1.7.6 will pull the authoritative server state.
         webview.start(private_mode=True)
 
     def _on_loaded(self):
-        """Handle page loads. Only the first invocation runs startup."""
         with self._startup_lock:
             if self._startup_started:
                 logger.info("Ignoring duplicate GobboNet page-load event.")
@@ -157,7 +268,6 @@ class GobboNetWebViewBridge:
             self._startup_started = True
 
         try:
-            # Auto-accept any restore / sync confirm() dialogs.
             self.eval_js("""
                 window.confirm = function(msg) {
                     console.log('[GobboBuddy] Auto-accepting confirm:', msg);
@@ -171,12 +281,7 @@ class GobboNetWebViewBridge:
             self.ui_ready_event.set()
 
             logger.info("GobboNet UI is ready; waiting for application state...")
-
-            # Give GobboNet's own checkServerStateOnBoot a moment to run.
-            # 1.7.6 now correctly restores characters even when threads == 0.
             time.sleep(1.5)
-
-            # Optional explicit nudge (harmless if already restored).
             self._nudge_server_restore()
 
             state = self.wait_for_gobbonet_state(timeout=PAGE_READY_TIMEOUT)
@@ -186,8 +291,18 @@ class GobboNetWebViewBridge:
             self.mutations_allowed = True
             self._startup_complete = True
             self.state_ready_event.set()
-
             logger.info("GobboNet state verified. Mutations are now ENABLED.")
+
+            try:
+                name, char_id = self.get_active_character()
+                if name:
+                    self.active_character_name = name
+                    self.active_character_id = char_id
+                    logger.info(f"Detected currently active GobboNet character: {name!r}")
+                else:
+                    logger.warning("Could not determine the currently active GobboNet character.")
+            except Exception as error:
+                logger.warning(f"Active character detection failed (non-fatal): {error}")
 
         except Exception as error:
             self.state_confirmed = False
@@ -197,10 +312,6 @@ class GobboNetWebViewBridge:
             logger.error("GobboBuddy will remain READ-ONLY/LOCKED.")
 
     def _nudge_server_restore(self):
-        """
-        Softly ask GobboNet to pull the server backup if it hasn't already.
-        Safe on 1.7.6+ because empty-thread backups with characters are now accepted.
-        """
         with self.operation_lock:
             try:
                 result = self.eval_js("""
@@ -236,9 +347,6 @@ class GobboNetWebViewBridge:
             }})()
         """)
 
-    # ============================================================
-    # UI READINESS
-    # ============================================================
     def _wait_for_ui(self, timeout=PAGE_READY_TIMEOUT):
         deadline = time.time() + timeout
         while time.time() < deadline:
@@ -261,9 +369,6 @@ class GobboNetWebViewBridge:
             time.sleep(0.5)
         raise RuntimeError("GobboNet chat UI never became available.")
 
-    # ============================================================
-    # GOBBONET STATE
-    # ============================================================
     def get_state_summary(self):
         return self.eval_js("""
             (() => {
@@ -308,32 +413,16 @@ class GobboNetWebViewBridge:
     def validate_startup_state(self, state_info):
         if not isinstance(state_info, dict):
             raise RuntimeError("GobboNet returned invalid state information.")
-
         character_count = state_info.get("characterCount")
         thread_count = state_info.get("threadCount")
-
         if not isinstance(character_count, int) or not isinstance(thread_count, int):
             raise RuntimeError("Invalid GobboNet character/thread count.")
-
         logger.info(f"Validated GobboNet state: {character_count} characters, {thread_count} threads.")
-
-        # With 1.7.6 we no longer treat zero characters as an automatic hard failure
-        # at startup (the server may legitimately have only the default assistant
-        # until the restore finishes). We still record the counts for the later
-        # safety tripwire.
         self.last_known_character_count = character_count
         self.last_known_thread_count = thread_count
-
-        # Soft warning only – do not lock the whole buddy.
         if character_count == 0:
-            logger.warning(
-                "GobboNet reported zero character cards at startup. "
-                "This may still be early in the restore cycle."
-            )
+            logger.warning("GobboNet reported zero character cards at startup (may still be restoring).")
 
-    # ============================================================
-    # CONTINUING STATE SAFETY
-    # ============================================================
     def verify_state_still_exists(self):
         if self.safety_lock:
             return False
@@ -342,18 +431,14 @@ class GobboNetWebViewBridge:
         except Exception as error:
             self._engage_safety_lock(f"Could not read GobboNet state: {error}")
             return False
-
         if not state_info or not state_info.get("ok"):
             self._engage_safety_lock(
                 f"GobboNet state became unavailable: "
                 f"{state_info.get('reason') if state_info else 'unknown'}"
             )
             return False
-
         character_count = state_info["characterCount"]
         thread_count = state_info["threadCount"]
-
-        # Tripwire: if we previously saw real characters and they suddenly vanish.
         if (
             self.last_known_character_count is not None
             and self.last_known_character_count > 0
@@ -364,7 +449,6 @@ class GobboNetWebViewBridge:
                 f"{self.last_known_character_count} characters to ZERO."
             )
             return False
-
         self.last_known_character_count = character_count
         self.last_known_thread_count = thread_count
         return True
@@ -389,17 +473,11 @@ class GobboNetWebViewBridge:
         if not self.verify_state_still_exists():
             raise RuntimeError("GobboNet state verification failed. Mutation blocked.")
 
-    # ============================================================
-    # GENERAL JS
-    # ============================================================
     def eval_js(self, script):
         if not self.window:
             raise RuntimeError("GobboNet WebView does not exist.")
         return self.window.evaluate_js(script)
 
-    # ============================================================
-    # CHARACTER READ
-    # ============================================================
     def get_character_cards(self):
         result = self.eval_js("""
             (() => {
@@ -425,9 +503,36 @@ class GobboNetWebViewBridge:
             )
         return result["cards"]
 
-    # ============================================================
-    # CHARACTER ACTIVATION
-    # ============================================================
+    def get_active_character(self):
+        result = self.eval_js("""
+            (() => {
+                if (typeof state === "undefined" || state === null) {
+                    return { ok: false, reason: "state unavailable" };
+                }
+                const cards = Array.isArray(state.characterCards) ? state.characterCards : [];
+                if (cards.length === 0) {
+                    return { ok: false, reason: "no character cards" };
+                }
+
+                const findCard = (id) => cards.find(c => c.id === id) || null;
+
+                const directId = state.activeCardId
+                if (directId) {
+                    const c = findCard(directId);
+                    if (c) return { ok: true, id: c.id, name: c.name || "Unnamed", method: "state id" };
+                }
+
+                return { ok: false, reason: "could not determine active character" };
+            })()
+        """)
+        if not result or not result.get("ok"):
+            logger.warning(
+                "get_active_character: " + str(result.get("reason") if result else "no result")
+            )
+            return None, None
+        logger.info(f"Active character resolved via '{result.get('method')}'.")
+        return result.get("name"), result.get("id")
+
     def activate_character(self, card_id):
         with self.operation_lock:
             self.assert_mutations_allowed()
@@ -435,7 +540,6 @@ class GobboNetWebViewBridge:
             matching = [card for card in cards if card.get("id") == card_id]
             if not matching:
                 raise RuntimeError(f"Refusing to activate unknown character {card_id!r}.")
-
             escaped_id = json.dumps(card_id)
             result = self.eval_js(f"""
                 (() => {{
@@ -448,33 +552,46 @@ class GobboNetWebViewBridge:
             """)
             if not result:
                 raise RuntimeError("GobboNet failed to activate the selected character.")
+            self.active_character_id = card_id
+            self.active_character_name = matching[0].get("name", "Unnamed")
             return True
 
-    # ============================================================
-    # NEW THREAD
-    # ============================================================
     def create_new_thread(self):
         with self.operation_lock:
             self.assert_mutations_allowed()
             result = self.eval_js("""
                 (() => {
-                    if (typeof createNewThread === "function") return createNewThread();
-                    if (typeof createThread === "function") return createThread();
-                    if (typeof window.createThread === "function") return window.createThread();
-                    const newBtn = document.querySelector(
-                        '#new-thread-btn, .new-chat-btn, button[title*="New"]'
-                    );
-                    if (newBtn) { newBtn.click(); return true; }
-                    return false;
+                    try {
+                        if (typeof createNewThread === "function") {
+                            createNewThread();
+                            return true;
+                        }
+                        if (typeof createThread === "function") {
+                            createThread();
+                            return true;
+                        }
+                        if (typeof window.createThread === "function") {
+                            window.createThread();
+                            return true;
+                        }
+                        const newBtn = document.querySelector(
+                            '#new-thread-btn, .new-chat-btn, button[title*="New"]'
+                        );
+                        if (newBtn) {
+                            newBtn.click();
+                            return true;
+                        }
+                        return false;
+                    } catch (e) {
+                        console.error('[GobboBuddy] create_new_thread error:', e);
+                        return false;
+                    }
                 })()
             """)
-            if not result:
+            if result is False:
                 raise RuntimeError("GobboNet could not create a new thread.")
-            return result
+            return True
 
-    # ============================================================
-    # STOP GENERATION
-    # ============================================================
     def stop_generation(self):
         with self.operation_lock:
             if not self.state_ready_event.is_set():
@@ -493,13 +610,9 @@ class GobboNetWebViewBridge:
                 })()
             """)
 
-    # ============================================================
-    # MESSAGE SENDING
-    # ============================================================
     def send_message(self, prompt_text):
         with self.operation_lock:
             self.assert_mutations_allowed()
-
             js_prompt = json.dumps(prompt_text, ensure_ascii=False)
 
             script = r"""
@@ -684,9 +797,15 @@ def get_active_window_info():
                 if name:
                     pieces.append(f"[{ctrl_type}] {name}")
                 if val and val != name:
-                    pieces.append(val[:MAX_RAW_CONTENT_CHARS])
+                    if MAX_RAW_CONTENT_CHARS is not None and MAX_RAW_CONTENT_CHARS > 0:
+                        pieces.append(val[:MAX_RAW_CONTENT_CHARS])
+                    else:
+                        pieces.append(val)
 
-            content = " | ".join(pieces).strip()[:MAX_RAW_CONTENT_CHARS]
+            content = " | ".join(pieces).strip()
+            if MAX_RAW_CONTENT_CHARS is not None and MAX_RAW_CONTENT_CHARS > 0:
+                content = content[:MAX_RAW_CONTENT_CHARS]
+
             return {
                 "app_name": app_name,
                 "title": title[:300],
@@ -714,46 +833,25 @@ def summarize_with_direct_gguf(app_name: str, title: str, content: str) -> str:
         return f"looking at {title or app_name}"
 
 def classify_emotion_with_direct_gguf(text: str) -> str:
+    tag_list = build_emotion_tag_list(EMOTION_MAP)
     prompt = (
-        f"It is fun for RPG characters to show dramatic feelings when they speak, like these:\n"
-        "[NEUTRAL], [HAPPY], [JOKING], [CURIOUS], [SNARKY], [EXCITED], [SKEPTICAL], [JUDGING], [SHOCKED], [SAD], [ANXIOUS], [EMBARRASSED], [FLATTERED]\n"
-        "Which of those emotions would be interesting to see in an RPG character saying this:\n\n\"\"\"\n{text}\n\"\"\"\n\n"        
+        f"It is fun for RPG characters to show dramatic feelings with their body language when they speak, like these:\n"
+        "{tag_list}\n"
+        "Which of the listed emotions would be interesting to see in an RPG character saying this:\n\n\"\"\"\n{text}\n\"\"\"\n\n"        
         )
-    
-    prompt3 = (#pretty good; snarky too often
+
+    #test prompts... here for me to switch between them and try things out.
+    prompt2 = (#pretty good; snarky too often
         f"You overhear someone saying this:\n\n[[[\n{text}\n]]]\n\n"
         "What emotion was the speaker pretending to feel? Choose one of these:\n"
-        "[NEUTRAL], [HAPPY], [JOKING], [CURIOUS], [SNARKY], [EXCITED], [SKEPTICAL], [JUDGING], [SHOCKED], [SAD], [ANXIOUS], [EMBARRASSED], [FLATTERED]"
+        "{tag_list}"
         )
     
-    prompt2 = (#pretty good; shocked too often
-        "You are an emotion classifier.\n"
-        "Determine the primary emotion expressed by the speaker.\n\n"
-
-        "EMOTION DEFINITIONS:\n"
-        "[NEUTRAL] = no strong emotion\n"
-        "[HAPPY] = pleasure, joy, satisfaction, contentment\n"
-        "[JOKING] = intentionally humorous or playful\n"
-        "[CURIOUS] = wanting to know or understand something\n"
-        "[SNARKY] = mocking, sarcastic, or derisive\n"
-        "[EXCITED] = strong enthusiasm or eager anticipation\n"
-        "[SKEPTICAL] = doubt, disbelief, or suspicion\n"
-        "[JUDGING] = disapproval, criticism, or condemnation\n"
-        "[SHOCKED] = sudden surprise or astonishment\n"
-        "[SAD] = sorrow, grief, disappointment, or misery\n"
-        "[ANXIOUS] = fear, worry, dread, or concern about danger\n"
-        "[EMBARRASSED] = shame, awkwardness, or social discomfort\n"
-        "[FLATTERED] = pleased by praise or admiration\n\n"
-
-        "Reply with ONLY the emotion tag.\n\n"
-        f"Message:\n{text}\n\n"
-        "Emotion:"
-    )
     prompt1 = (#happy too often
         "You are an emotion classifier. You output emotion tags to improve immersion for a video game.\n\n"
         #"Do NOT judge whether the message is good, bad, funny, or polite.\n"
         #"Do NOT assume the speaker is happy just because they are talking conversationally.\n"
-        "You support the following tags: \n\n[NEUTRAL] | [HAPPY] | [JOKING] | [CURIOUS] | [SNARKY] | [EXCITED] | [SKEPTICAL] | [JUDGING] | [SHOCKED] | [SAD] | [ANXIOUS] | [EMBARRASSED] | [FLATTERED]"
+        "You support the following tags: \n\n{tag_list}"
         "Examples:\n"
         "NPC: '''You look really happy today!''' > [NEUTRAL]\n"
         "NPC: '''I am absolutely terrified of spiders.''' > [ANXIOUS]\n"
@@ -769,11 +867,8 @@ def classify_emotion_with_direct_gguf(text: str) -> str:
     )
     #print(text[:1200])
 
-    grammar = (
-        'root ::= "[NEUTRAL]" | "[HAPPY]" | "[JOKING]" | "[CURIOUS]" | "[SNARKY]" | '
-        '"[EXCITED]" | "[SKEPTICAL]" | "[JUDGING]" | "[SHOCKED]" | "[SAD]" | '
-        '"[ANXIOUS]" | "[EMBARRASSED]" | "[FLATTERED]"'
-    )
+    grammar_parts = [f'"[{tag.upper()}]"' for tag in EMOTION_MAP]
+    grammar = "root ::= " + " | ".join(grammar_parts)
 
     payload = {
         "model": "local",
@@ -800,52 +895,49 @@ def classify_emotion_with_direct_gguf(text: str) -> str:
         return DEFAULT_EMOTION
 
 def proactive_prompt_rotator():
-    garden = [
-        "What do the goblin warriors do when they encounter this kind of thing?",
-        "What would a goblin warrior think about this?",
-        "Does this remind you of the wars?",
-        "Does anything here look suspicious?",
-        "How would you conquer this task?",
-        "What does this remind you of?",
-        "What weapon would you choose here?",
-        "There is a mighty dragon here.",
-        "It is office work! Oh my!",
-        "Is there anything here worth looting?",
-        "What kind of dark magic forced this onto the screen?",
-        "This could be a bandit hideout. Prepare for battle.",
-        "How do you think this would taste?",
-        "Can we throw a rock at this?",
-        "Does this look like a good spot to stop and take a nap?",
-        "What terrible curse brought this awful sight before us?",
-        "Call the horde to smash whatever is happening here.",
-        "Is there any beer nearby to help us with this?",
-        "How does this situation smell to your sharp goblin nose?",
-        "How can we sabotage it?",
-        "Could this be a map to a hidden dungeon?",
-        "Can we trade this to an ogre for a chicken leg?",
-        "What would the warlocks say about this?",
-        "It is from the ancient spellbooks of the high elves.",
-        "This reminds me of the goblin wars.",
-        "How did the goblin wizards handle these in the past?",
-        "Is it a trap?",
-        "What kind of potion do we need for this?",
-        "Is it an omen?",
-        "What kind of potion could we make with this?",
-        "How did the clan chief instruct us to handle this?",
-        "How did you handle this last time you were in the woods?",
-        "RAAAAAAARRRRGH!!!! Arm yourself! It's about to attack!",
-        "Should we handle this the sneaky way, or attack it head on?"
-    ]
-    return random.choice(garden)
+    if not PROACTIVE_PROMPTS:
+        return "What do you think about this?"
+    return random.choice(PROACTIVE_PROMPTS)
 
 def build_simple_user_message(app_name: str, title: str, summary: str) -> str:
     what = title if title and title != "(no title)" else app_name
     what = what.replace("-", "")
     prompt = proactive_prompt_rotator()
-    return (
-        f"Fumo, I'm using '{app_name}', looking at '{what}'. "
-        f"The page shows things like ['{summary}']. \n\n{prompt}"
+    return PROACTIVE_TEMPLATE.format(
+        app_name=app_name,
+        what=what,
+        summary=summary,
+        prompt=prompt
     )
+
+# ============================================================
+# SPRITE RESIZE DIALOG HELPER
+# ============================================================
+class SpriteSizeDialog(simpledialog.Dialog):
+    def __init__(self, parent, current_w, current_h):
+        self.w = current_w
+        self.h = current_h
+        super().__init__(parent, "Resize Sprite")
+
+    def body(self, master):
+        tk.Label(master, text="Sprite Width (px):").grid(row=0, column=0, sticky="w", padx=5, pady=5)
+        self.w_entry = tk.Entry(master)
+        self.w_entry.insert(0, str(self.w))
+        self.w_entry.grid(row=0, column=1, padx=5, pady=5)
+
+        tk.Label(master, text="Sprite Height (px):").grid(row=1, column=0, sticky="w", padx=5, pady=5)
+        self.h_entry = tk.Entry(master)
+        self.h_entry.insert(0, str(self.h))
+        self.h_entry.grid(row=1, column=1, padx=5, pady=5)
+        return self.w_entry
+
+    def apply(self):
+        try:
+            self.result_w = int(self.w_entry.get())
+            self.result_h = int(self.h_entry.get())
+        except ValueError:
+            self.result_w = self.w
+            self.result_h = self.h
 
 # ============================================================
 # TKINTER UI
@@ -860,6 +952,8 @@ class GobboNetHelper(tk.Tk):
         self.wm_attributes("-transparentcolor", TRANSPARENT_COLOR)
         self.configure(bg=TRANSPARENT_COLOR)
 
+        self.proactive_var = tk.BooleanVar(value=PROACTIVE_ENABLED)
+
         self._drag_start_x = 0
         self._drag_start_y = 0
         self._is_dragging = False
@@ -871,6 +965,7 @@ class GobboNetHelper(tk.Tk):
         self.raw_stream_text = ""
         self.parsed_emotion = None
         self.sprites = {}
+        self._raw_sheet = None
 
         self._last_message_time = time.time()
         self._next_opportunity_at = None
@@ -878,8 +973,6 @@ class GobboNetHelper(tk.Tk):
 
         self._proactive_lock = threading.Lock()
         self._proactive_busy = False
-
-        self.load_sprite_sheet()
 
         self.container = tk.Frame(self, bg=TRANSPARENT_COLOR)
         self.container.pack(fill="both", expand=True)
@@ -911,7 +1004,9 @@ class GobboNetHelper(tk.Tk):
         self.sprite_label.pack()
 
         self.current_emotion = DEFAULT_EMOTION
-        self.update_sprite(DEFAULT_EMOTION)
+
+        # Load sprites with explicit width and height
+        self.load_sprite_sheet()
 
         # Drag bindings
         self.sprite_label.bind("<ButtonPress-1>", self.on_press)
@@ -949,10 +1044,29 @@ class GobboNetHelper(tk.Tk):
         self._last_message_time = time.time()
         self._schedule_next_opportunity()
 
+    def _sync_buddy_name_from_bridge(self):
+        """Pick up the auto-detected active character as BUDDY_NAME, once available."""
+        global BUDDY_NAME
+        if not GOBBO_BRIDGE.state_ready_event.is_set():
+            return
+        detected = GOBBO_BRIDGE.active_character_name
+        if detected and BUDDY_NAME != detected:
+            BUDDY_NAME = detected
+            logger.info(f"BUDDY_NAME auto-set to '{BUDDY_NAME}' from active GobboNet character.")
+
+    def toggle_proactive(self):
+        global PROACTIVE_ENABLED
+        PROACTIVE_ENABLED = self.proactive_var.get()
+        CONFIG["proactive_enabled"] = PROACTIVE_ENABLED
+        save_config(CONFIG)
+        logger.info(f"Proactive mode set to: {PROACTIVE_ENABLED}")
+
     def _tick_proactive(self):
         try:
+            self._sync_buddy_name_from_bridge()
             if (
-                HAS_ACCESSIBILITY
+                PROACTIVE_ENABLED
+                and HAS_ACCESSIBILITY
                 and self._next_opportunity_at
                 and time.time() >= self._next_opportunity_at
                 and not self._proactive_busy
@@ -988,29 +1102,98 @@ class GobboNetHelper(tk.Tk):
     # ============================================================
     # SPRITES
     # ============================================================
-    def load_sprite_sheet(self):
-        if not os.path.exists(SPRITE_SHEET_PATH):
-            placeholder = Image.new("RGBA", (100, 100), color=(200, 200, 200))
+    def load_sprite_sheet(self, path=None, width=None, height=None):
+        global SPRITE_SHEET_PATH, SPRITE_WIDTH, SPRITE_HEIGHT, ROWS, COLS, EMOTION_MAP
+
+        path = path or SPRITE_SHEET_PATH
+        width = width or SPRITE_WIDTH
+        height = height or SPRITE_HEIGHT
+
+        sheet_path = Path(path)
+        if not sheet_path.is_absolute():
+            sheet_path = SCRIPT_DIR / sheet_path
+
+        if not sheet_path.exists():
+            logger.warning(f"Sprite sheet not found: {sheet_path}")
+            placeholder = Image.new("RGBA", (width, height), color=(200, 200, 200))
+            self._raw_sheet = placeholder
             self.placeholder_img = ImageTk.PhotoImage(placeholder)
             for emotion in EMOTION_MAP:
                 self.sprites[emotion] = self.placeholder_img
             return
 
-        sheet = Image.open(SPRITE_SHEET_PATH).convert("RGBA")
-        sw, sh = sheet.size
+        sheet = Image.open(sheet_path).convert("RGBA")
+        self._raw_sheet = sheet
+        SPRITE_SHEET_PATH = str(path)
+        SPRITE_WIDTH = width
+        SPRITE_HEIGHT = height
+
+        self._rebuild_sprites()
+
+    def _rebuild_sprites(self):
+        if self._raw_sheet is None:
+            return
+
+        sw, sh = self._raw_sheet.size
         sp_w = sw // COLS
         sp_h = sh // ROWS
 
+        self.sprites.clear()
         for emotion, (r, c) in EMOTION_MAP.items():
-            cropped = sheet.crop((c * sp_w, r * sp_h, (c + 1) * sp_w, (r + 1) * sp_h))
-            self.sprites[emotion] = ImageTk.PhotoImage(
-                cropped.resize((SPRITE_SIZE_X, SPRITE_SIZE_Y), Image.Resampling.LANCZOS)
+            cropped = self._raw_sheet.crop(
+                (c * sp_w, r * sp_h, (c + 1) * sp_w, (r + 1) * sp_h)
             )
+            self.sprites[emotion] = ImageTk.PhotoImage(
+                cropped.resize((SPRITE_WIDTH, SPRITE_HEIGHT), Image.Resampling.LANCZOS)
+            )
+
+        self.update_sprite(self.current_emotion)
 
     def update_sprite(self, emotion):
         emotion = emotion.lower().strip()
         self.current_emotion = emotion if emotion in self.sprites else DEFAULT_EMOTION
-        self.sprite_label.config(image=self.sprites[self.current_emotion])
+        if self.current_emotion in self.sprites:
+            self.sprite_label.config(image=self.sprites[self.current_emotion])
+
+    def change_sprite_size(self):
+        global SPRITE_WIDTH, SPRITE_HEIGHT
+        dialog = SpriteSizeDialog(self, SPRITE_WIDTH, SPRITE_HEIGHT)
+        if hasattr(dialog, "result_w") and hasattr(dialog, "result_h"):
+            new_w = max(32, min(512, dialog.result_w))
+            new_h = max(32, min(512, dialog.result_h))
+            if new_w != SPRITE_WIDTH or new_h != SPRITE_HEIGHT:
+                SPRITE_WIDTH = new_w
+                SPRITE_HEIGHT = new_h
+                CONFIG["sprite_width"] = new_w
+                CONFIG["sprite_height"] = new_h
+                save_config(CONFIG)
+                self._rebuild_sprites()
+                self.update_sprite_anchor()
+                self.reposition_window_to_anchor()
+                logger.info(f"Sprite size set to {new_w}x{new_h}px")
+
+    def change_sprite_sheet(self):
+        path = filedialog.askopenfilename(
+            title="Select Sprite Sheet",
+            filetypes=[("PNG images", "*.png"), ("All files", "*.*")],
+            initialdir=SCRIPT_DIR
+        )
+        if not path:
+            return
+        try:
+            rel = Path(path).relative_to(SCRIPT_DIR)
+            store_path = str(rel)
+        except ValueError:
+            store_path = path
+
+        global SPRITE_SHEET_PATH
+        SPRITE_SHEET_PATH = store_path
+        CONFIG["sprite_sheet"] = store_path
+        save_config(CONFIG)
+        self.load_sprite_sheet(path=store_path, width=SPRITE_WIDTH, height=SPRITE_HEIGHT)
+        self.update_sprite_anchor()
+        self.reposition_window_to_anchor()
+        logger.info(f"Sprite sheet changed to {store_path}")
 
     # ============================================================
     # WINDOW DRAGGING
@@ -1105,15 +1288,15 @@ class GobboNetHelper(tk.Tk):
     # ============================================================
     def open_prompt_dialog(self):
         if not GOBBO_BRIDGE.state_ready_event.is_set():
-            self.set_speech_bubble("GobboNet is still loading...")
+            self.set_speech_bubble("Still loading...")
             return
-        user_text = simpledialog.askstring("GobboNet", "Say something:")
+        user_text = simpledialog.askstring(BUDDY_NAME, "Say something:")
         if user_text:
             self.send_to_gobbonet(user_text)
 
     def send_to_gobbonet(self, prompt_text):
         if not GOBBO_BRIDGE.state_ready_event.is_set():
-            self.set_speech_bubble("GobboNet isn't ready yet.")
+            self.set_speech_bubble("Not ready yet.")
             return
 
         self.raw_stream_text = ""
@@ -1133,15 +1316,12 @@ class GobboNetHelper(tk.Tk):
                 clean = clean.split("]", 1)[1].lstrip()
             self.response_queue.put({"emotion": emotion, "text": clean})
         except Exception as error:
-            logger.exception("GobboNet worker failed.")
+            logger.exception("Worker failed.")
             self.response_queue.put({
                 "emotion": DEFAULT_EMOTION,
-                "text": f"[GOBBONET ERROR: {error}]"
+                "text": f"[ERROR: {error}]"
             })
 
-    # ============================================================
-    # RESPONSE QUEUE
-    # ============================================================
     def check_queue(self):
         while not self.response_queue.empty():
             item = self.response_queue.get()
@@ -1167,7 +1347,7 @@ class GobboNetHelper(tk.Tk):
 
         try:
             if not GOBBO_BRIDGE.state_ready_event.is_set():
-                character_menu.add_command(label="GobboNet still loading...", state="disabled")
+                character_menu.add_command(label="Still loading...", state="disabled")
             else:
                 cards = GOBBO_BRIDGE.get_character_cards()
                 if cards:
@@ -1176,18 +1356,27 @@ class GobboNetHelper(tk.Tk):
                         card_name = card.get("name", "Unnamed")
                         character_menu.add_command(
                             label=card_name,
-                            command=lambda cid=card_id: self.select_character(cid)
+                            command=lambda cid=card_id, cname=card_name: self.select_character(cid,cname)
                         )
                 else:
                     character_menu.add_command(label="No characters found", state="disabled")
         except Exception as error:
-            logger.error(f"Could not read GobboNet characters: {error}")
+            logger.error(f"Could not read characters: {error}")
             character_menu.add_command(label="Characters unavailable", state="disabled")
 
         menu.add_cascade(label="Character", menu=character_menu)
         menu.add_separator()
         menu.add_command(label="New Thread", command=self.new_thread)
         menu.add_command(label="Stop Generation", command=self.stop_generation)
+        menu.add_separator()
+        menu.add_checkbutton(
+            label="Enable Proactive",
+            variable=self.proactive_var,
+            command=self.toggle_proactive
+        )
+        menu.add_separator()
+        menu.add_command(label="Resize Sprite…", command=self.change_sprite_size)
+        menu.add_command(label="Change Sprite Sheet…", command=self.change_sprite_sheet)
         menu.add_separator()
         menu.add_command(label="Quit", command=self.quit_application)
 
@@ -1199,13 +1388,15 @@ class GobboNetHelper(tk.Tk):
     # ============================================================
     # CHARACTER / THREAD ACTIONS
     # ============================================================
-    def select_character(self, card_id):
+    def select_character(self, card_id, card_name):
         try:
+            global BUDDY_NAME
+            BUDDY_NAME = card_name
             GOBBO_BRIDGE.activate_character(card_id)
             self.new_thread()
         except Exception as error:
             logger.error(f"Character activation blocked: {error}")
-            self.set_speech_bubble(f"[GobboNet safety lock: {error}]")
+            self.set_speech_bubble(f"[Safety lock: {error}]")
 
     def new_thread(self):
         try:
@@ -1215,7 +1406,7 @@ class GobboNetHelper(tk.Tk):
             self._note_message_exchanged()
         except Exception as error:
             logger.error(f"New thread blocked: {error}")
-            self.set_speech_bubble(f"[GobboNet safety lock: {error}]")
+            self.set_speech_bubble(f"[Safety lock: {error}]")
 
     def stop_generation(self):
         try:
