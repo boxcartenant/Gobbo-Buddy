@@ -1401,11 +1401,12 @@ class GobboNetHelper(tk.Tk):
         menu.add_command(label="New Thread", command=self.new_thread)
         menu.add_command(label="Stop Generation", command=self.stop_generation)
         menu.add_separator()
-        menu.add_checkbutton(
-            label="Enable Proactive",
-            variable=self.proactive_var,
-            command=self.toggle_proactive
-        )
+        if HAS_ACCESSIBILITY:
+            menu.add_checkbutton(
+                label="Enable Proactive",
+                variable=self.proactive_var,
+                command=self.toggle_proactive
+            )
         menu.add_separator()
         menu.add_command(label="Resize Sprite…", command=self.change_sprite_size)
         menu.add_command(label="Change Sprite Sheet…", command=self.change_sprite_sheet)
