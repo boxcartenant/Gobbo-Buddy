@@ -149,23 +149,23 @@ def load_config():
 
     # First run – write complete defaults
     cfg = {
-        "SPRITE_COMMENT": "Change sprite_sheet to the sheet you want to load at start."
+        "SPRITE_COMMENT": "Change sprite_sheet to the sheet you want to load at start.",
         "sprite_sheet": DEFAULT_SPRITE_SHEET,
-        "SPRITE_HW_COMMENT": "Sprites are captured based on row/col count, and then scaled to these pixel dimensions:"
+        "SPRITE_HW_COMMENT": "Sprites are captured based on row/col count, and then scaled to these pixel dimensions:",
         "sprite_width": DEFAULT_SPRITE_WIDTH,
         "sprite_height": DEFAULT_SPRITE_HEIGHT,
-        "ROW_COL_COMMENT": "This is how many rows and columns your sprite sheet has. They should be evenly spaced."
+        "ROW_COL_COMMENT": "This is how many rows and columns your sprite sheet has. They should be evenly spaced.",
         "rows": DEFAULT_ROWS,
         "cols": DEFAULT_COLS,
-        "EMOTION_COMMENT": "Here you can register emotion words by sprite sheet row/column. It's ok to have many words for the same coordinate." 
+        "EMOTION_COMMENT": "Here you can register emotion words by sprite sheet row/column. It's ok to have many words for the same coordinate." ,
         "emotions": DEFAULT_EMOTIONS.copy(),
-        "PROACT_PROMPT_COMMENT": "These prompts are passed to the model with screen/accessibility data, so the model can say something interesting about what you're doing. A line is chosen at random each time. Add/remove/change them at will."
+        "PROACT_PROMPT_COMMENT": "These prompts are passed to the model with screen/accessibility data, so the model can say something interesting about what you're doing. A line is chosen at random each time. Add/remove/change them at will.",
         "proactive_prompts": DEFAULT_PROACTIVE_PROMPTS.copy(),
-        "PROACT_TMPLT_COMMENT": "This is the format for accessibility data sent to the model for summary."
+        "PROACT_TMPLT_COMMENT": "This is the format for accessibility data sent to the model for summary.",
         "proactive_template": DEFAULT_PROACTIVE_TEMPLATE,
-        "PROACT_ENABLE_COMMENT": "If you don't want this program reading your screen, just set proactive_enabled to false."
+        "PROACT_ENABLE_COMMENT": "If you don't want this program reading your screen, just set proactive_enabled to false.",
         "proactive_enabled": DEFAULT_PROACTIVE_ENABLED,
-        "RAW_CONTENT_COMMENT": "I am testing this with a very limited model, so I truncate the {what} part of the accessibility date before sending it. Set this to 0 to disable truncation."
+        "RAW_CONTENT_COMMENT": "I am testing this with a very limited model, so I truncate the {what} part of the accessibility date before sending it. Set this to 0 to disable truncation.",
         "max_raw_content_chars": DEFAULT_MAX_RAW_CONTENT_CHARS,
     }
     save_config(cfg)
@@ -1088,9 +1088,14 @@ class GobboNetHelper(tk.Tk):
                 return
             info = get_active_window_info()
             if info:
-                summary = summarize_with_direct_gguf(
-                    info["app_name"], info["title"], info["content"]
-                )
+                if info["content"] == '(no readable content)':
+                    summary = "Junk and garble. Nothing coherent to see."
+                else:
+                    summary = summarize_with_direct_gguf(
+                        info["app_name"],
+                        info["title"],
+                        info["content"]
+                    )
                 self.send_to_gobbonet(
                     build_simple_user_message(info["app_name"], info["title"], summary)
                 )
