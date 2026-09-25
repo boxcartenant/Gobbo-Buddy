@@ -14,31 +14,6 @@ import webview
 from screeninfo import get_monitors
 import sys
 
-# Optional Accessibility Stack
-try:
-    try:
-        import comtypes.client as _comtypes_client
-        SCRIPT_DIR = Path(__file__).resolve().parent
-        COMTYPES_CACHE_DIR = SCRIPT_DIR / "comtypes_cache"
-        COMTYPES_CACHE_DIR.mkdir(exist_ok=True)
-
-        _comtypes_client.gen_dir = str(COMTYPES_CACHE_DIR)
-    except OSError as _cache_err:
-        # Worst case, fall back to in-memory generation (slower, but works
-        # without ever touching disk).
-        logging.getLogger("GobboBuddy").warning(
-            f"Could not create comtypes cache dir, generating in-memory: {_cache_err}"
-        )
-        _comtypes_client.gen_dir = None
-        
-    import uiautomation as auto
-    import win32gui
-    import win32process
-    import psutil
-    HAS_ACCESSIBILITY = True
-except ImportError:
-    HAS_ACCESSIBILITY = False
-
 # ============================================================
 # LOGGING
 # ============================================================
@@ -79,6 +54,30 @@ DEFAULT_EMOTIONS = {
 DEFAULT_EMOTION = "neutral"
 TRANSPARENT_COLOR = "#15181D"
 MAX_BUBBLE_LINES = 30
+
+# Optional Accessibility Stack
+try:
+    try:
+        import comtypes.client as _comtypes_client
+        COMTYPES_CACHE_DIR = SCRIPT_DIR / "comtypes_cache"
+        COMTYPES_CACHE_DIR.mkdir(exist_ok=True)
+
+        _comtypes_client.gen_dir = str(COMTYPES_CACHE_DIR)
+    except OSError as _cache_err:
+        # Worst case, fall back to in-memory generation (slower, but works
+        # without ever touching disk).
+        logging.getLogger("GobboBuddy").warning(
+            f"Could not create comtypes cache dir, generating in-memory: {_cache_err}"
+        )
+        _comtypes_client.gen_dir = None
+        
+    import uiautomation as auto
+    import win32gui
+    import win32process
+    import psutil
+    HAS_ACCESSIBILITY = True
+except ImportError:
+    HAS_ACCESSIBILITY = False
 
 # Character-specific defaults (Fumo / goblin theme)
 BUDDY_NAME = ""
@@ -216,6 +215,9 @@ COLS = CONFIG["cols"]
 EMOTION_MAP = CONFIG["emotions"]
 PROACTIVE_PROMPTS = CONFIG["proactive_prompts"]
 PROACTIVE_TEMPLATE = CONFIG["proactive_template"]
+RANDOM_WINDOW_MIN_SECONDS = CONFIG["proactive_check_period_min"]
+RANDOM_WINDOW_MAX_SECONDS = CONFIG["proactive_check_period_max"]
+RANDOM_WINDOW_PROBABILITY = CONFIG["proactive_probability"]
 PROACTIVE_ENABLED = CONFIG.get("proactive_enabled", DEFAULT_PROACTIVE_ENABLED)
 MAX_RAW_CONTENT_CHARS = CONFIG.get("max_raw_content_chars", DEFAULT_MAX_RAW_CONTENT_CHARS)
 
@@ -1064,7 +1066,7 @@ class GobboNetHelper(tk.Tk):
     def _schedule_next_opportunity(self):
         delay = random.uniform(RANDOM_WINDOW_MIN_SECONDS, RANDOM_WINDOW_MAX_SECONDS)
         self._next_opportunity_at = time.time() + delay
-        #print(f"Proactive: next opportunity in {delay:.1f}s")
+        print(f"Proactive: next opportunity in {delay:.1f}s")
 
     def _note_message_exchanged(self):
         self._last_message_time = time.time()
