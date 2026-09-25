@@ -29,6 +29,30 @@ else:
     SCRIPT_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = SCRIPT_DIR / "gobbo_buddy_config.json"
 
+# Optional Accessibility Stack
+try:
+    try:
+        import comtypes.client as _comtypes_client
+        COMTYPES_CACHE_DIR = SCRIPT_DIR / "comtypes_cache"
+        COMTYPES_CACHE_DIR.mkdir(exist_ok=True)
+
+        _comtypes_client.gen_dir = str(COMTYPES_CACHE_DIR)
+    except OSError as _cache_err:
+        # Worst case, fall back to in-memory generation (slower, but works
+        # without ever touching disk).
+        logging.getLogger("GobboBuddy").warning(
+            f"Could not create comtypes cache dir, generating in-memory: {_cache_err}"
+        )
+        _comtypes_client.gen_dir = None
+        
+    import uiautomation as auto
+    import win32gui
+    import win32process
+    import psutil
+    HAS_ACCESSIBILITY = True
+except ImportError:
+    HAS_ACCESSIBILITY = False
+
 DEFAULT_SPRITE_SHEET = "gobbo sprites 2.png"
 DEFAULT_SPRITE_WIDTH = 120
 DEFAULT_SPRITE_HEIGHT = 120
@@ -54,30 +78,6 @@ DEFAULT_EMOTIONS = {
 DEFAULT_EMOTION = "neutral"
 TRANSPARENT_COLOR = "#15181D"
 MAX_BUBBLE_LINES = 30
-
-# Optional Accessibility Stack
-try:
-    try:
-        import comtypes.client as _comtypes_client
-        COMTYPES_CACHE_DIR = SCRIPT_DIR / "comtypes_cache"
-        COMTYPES_CACHE_DIR.mkdir(exist_ok=True)
-
-        _comtypes_client.gen_dir = str(COMTYPES_CACHE_DIR)
-    except OSError as _cache_err:
-        # Worst case, fall back to in-memory generation (slower, but works
-        # without ever touching disk).
-        logging.getLogger("GobboBuddy").warning(
-            f"Could not create comtypes cache dir, generating in-memory: {_cache_err}"
-        )
-        _comtypes_client.gen_dir = None
-        
-    import uiautomation as auto
-    import win32gui
-    import win32process
-    import psutil
-    HAS_ACCESSIBILITY = True
-except ImportError:
-    HAS_ACCESSIBILITY = False
 
 # Character-specific defaults (Fumo / goblin theme)
 BUDDY_NAME = ""
