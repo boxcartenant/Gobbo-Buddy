@@ -1,19 +1,26 @@
-Makes a little floating guy on the desktop with basic emotes.
+Makes a little floating guy on the desktop with basic emotes. 
 
-Most of this code, including the sprite sheet, were made almost entirely by AI. I'm trying to see how far AI will get me before I have to sit down and debug this manually.
+This code was mostly written by AI and debugged/cleaned-up by hand.
 
-Steps to make this work:
+To make this work: 
+1. Install [GobboNet](https://goblincorps.com/gobbonet) v1.7.6 or newer.
+2. Run the program (it initially loads with a gray square where your sprite goes. You have to make a profile to load sprites).
 
-1. Install Gobbonet v1.7.6 or better, with all the default settings
-2. Run the program with your sprite sheet in the same folder.
-3. Drag the character sprite away from the center of your monitor... then left click it to open the message dialogue, right click it to get some other options, aor just leave it alone and it'll sometimes say stuff about what you're doing.
+The right-click menu has options to select a Character (from your GobboNet character cards), and a Profile. The profile determines what sprite sheet is being used. If the Profile and the Character have the same name, and if you have selected the checkbox to auto-switch profiles on character select, then it'll do that.
 
-The first time you run the program, it will create a config.json file. I highly recommend that you edit that, to make it fit your use-case better.
+<img width="463" height="460" alt="Screenshot 2026-10-01 101832" src="https://github.com/user-attachments/assets/8b06ee77-8524-4343-a444-0437bb36741f" />
 
-This is what it looks like when it's talking:
+Your sprites should all be arranged grid-like on one image. The profile creation tool has a picker to associate emotion-words with sprites, for interaction.
+
+<img width="1121" height="801" alt="Screenshot 2026-10-01 102015" src="https://github.com/user-attachments/assets/296767a5-19c2-4588-a9f9-95cf620a26af" />
+
+The "Proactive" settings pass accessibility data and one of the proactive prompts to the buddy on a randomized-periodic basis, to trigger automated/unsolicited commentary on what you're doing.
+
+There are also a lot of settings you can modify. As long as you didn't customize the GobboNet URL, the defaults for these are basically ok.
+
+<img width="573" height="648" alt="Screenshot 2026-10-01 103124" src="https://github.com/user-attachments/assets/9829dfcd-1d44-4bbc-ad84-129f102009db" />
+
+GLHF
 
 <img width="247" height="219" alt="image" src="https://github.com/user-attachments/assets/5b6ee7f1-816a-4ef9-b604-515a27c7c142" />
 
-Still working on my character sheets. This polite roaring is from a 135M gguf.
-
-Good luck!
