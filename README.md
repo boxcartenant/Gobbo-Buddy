@@ -12,7 +12,7 @@ The right-click menu has options to select a Character (from your GobboNet chara
 
 Your sprites should all be arranged grid-like on one image. The profile creation tool has a picker to associate emotion-words with sprites, for interaction.
 
-<img width="1121" height="801" alt="Screenshot 2026-10-01 102015" src="https://github.com/user-attachments/assets/296767a5-19c2-4588-a9f9-95cf620a26af" />
+<img width="1121" height="801" alt="Screenshot 2026-10-01 102015" src="https://github.com/user-attachments/assets/ee364ad5-c7f4-4d51-9550-6a024a9e7d7f" />
 
 The "Proactive" settings pass accessibility data and one of the proactive prompts to the buddy on a randomized-periodic basis, to trigger automated/unsolicited commentary on what you're doing.
 
